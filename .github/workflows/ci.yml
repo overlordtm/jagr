@@ -1,0 +1,91 @@
+name: CI/CD
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go test ./...
+
+  build-agent:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux, darwin, windows, freebsd, openbsd, netbsd]
+        arch: [amd64, arm64, 386, arm, ppc64le, s390x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: |
+          mkdir -p dist
+          if [ "${{ matrix.os }}" == "windows" ]; then
+            ext=".exe"
+          else
+            ext=""
+          fi
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} CGO_ENABLED=0 go build -o "dist/jagr-agent-${{ matrix.os }}-${{ matrix.arch }}${ext}" ./cmd/agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/
+          retention-days: 7
+
+  build-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/jagr-gateway-linux-amd64 ./cmd/gateway
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o dist/jagr-gateway-linux-arm64 ./cmd/gateway
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-binaries
+          path: dist/
+          retention-days: 7
+
+  build-and-push-docker:
+    needs: [build-gateway]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semantic,pattern=v{{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: gateway/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
