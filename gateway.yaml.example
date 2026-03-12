@@ -1,0 +1,43 @@
+server:
+  listen: ":8443"
+  tls:
+    cert: /etc/jagr/server.crt
+    key: /etc/jagr/server.key
+    client_ca: /etc/jagr/ca.crt
+
+database:
+  path: /var/lib/jagr/jagr.db
+
+rate_limit:
+  requests_per_minute: 30
+  max_concurrent: 5
+
+session:
+  timeout_minutes: 120
+  history_mode: gateway
+
+providers:
+  - name: openrouter
+    type: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}
+    models:
+      - alias: "default"
+        upstream: "anthropic/claude-sonnet-4"
+      - alias: "fast"
+        upstream: "anthropic/claude-haiku-4"
+
+  - name: local-ollama
+    type: openai_compatible
+    base_url: http://localhost:11434/v1
+    api_key: ""
+    models:
+      - alias: "local"
+        upstream: "llama3.1:70b"
+
+default_provider: openrouter
+default_model: default
+
+logging:
+  level: info
+  audit: true
