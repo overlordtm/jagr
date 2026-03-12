@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	_ "github.com/mattn/go-sqlite3"
 	
 	"github.com/overlordtm/jagr/internal/gateway/models"
 )
