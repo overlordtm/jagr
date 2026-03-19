@@ -84,6 +84,10 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-binaries
+          path: dist/
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to GHCR
@@ -109,7 +113,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  nightly-build:
+  nightly-agent:
     runs-on: ubuntu-latest
     needs: [test]
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -151,10 +155,40 @@ jobs:
           name: agent-binaries-nightly-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
           retention-days: 7
+
+  nightly-gateway:
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
       - name: Build gateway binaries
         run: |
+          mkdir -p dist
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/jagr-gateway-linux-amd64 ./cmd/gateway
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o dist/jagr-gateway-linux-arm64 ./cmd/gateway
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-binaries-nightly
+          path: dist/
+          retention-days: 7
+
+  nightly-docker:
+    runs-on: ubuntu-latest
+    needs: [nightly-gateway]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-binaries-nightly
+          path: dist/
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to GHCR

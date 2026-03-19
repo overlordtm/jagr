@@ -2,7 +2,7 @@ FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates
 
-COPY jagr-gateway-linux-amd64 /usr/local/bin/jagr-gateway
+COPY dist/jagr-gateway-linux-amd64 /usr/local/bin/jagr-gateway
 
 RUN chmod +x /usr/local/bin/jagr-gateway
 
