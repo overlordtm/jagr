@@ -63,8 +63,11 @@ func loadConfig(path string) (*models.Config, error) {
 		return nil, err
 	}
 
+	// Expand environment variables (e.g., ${OPENROUTER_API_KEY})
+	expanded := os.ExpandEnv(string(data))
+
 	var config models.Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &config); err != nil {
 		return nil, err
 	}
 

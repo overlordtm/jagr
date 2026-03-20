@@ -3,6 +3,7 @@ package gateway
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -86,7 +87,10 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/admin/exercises/{exercise_id}/agents", g.adminAgentsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions", g.adminSessionsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions/{session_id}/messages", g.adminMessagesHandler).Methods("GET")
+	router.HandleFunc("/admin/agents/{agent_id}/sessions/{session_id}/events", g.adminEventsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/logs", g.adminLogsHandler).Methods("GET")
+	router.HandleFunc("/admin/api-keys", g.adminCreateAPIKeyHandler).Methods("POST")
+	router.HandleFunc("/admin/api-keys/{api_key}", g.adminDeleteAPIKeyHandler).Methods("DELETE")
 }
 
 func (g *Gateway) healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +128,21 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Enforce rate limiting
+	if !g.rateLimiter.Allow(agent.ID) {
+		g.log.Warn("Rate limit exceeded", zap.String("agent_id", agent.ID))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorInfo{
+				Message: "rate limit exceeded",
+				Type:    "rate_limit_error",
+				Code:    "rate_limit_exceeded",
+			},
+		})
+		return
+	}
+
 	sessionID, err := g.getOrCreateSession(agent.ID)
 	if err != nil {
 		g.log.Error("Failed to get session", zap.Error(err))
@@ -140,6 +159,13 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Handle streaming requests
+	if req.Stream {
+		g.handleStreamingRequest(w, r, agent, session, reqWithHistory)
+		return
+	}
+
+	startTime := time.Now()
 	resp, err := g.provider.ChatCompletion(r.Context(), reqWithHistory)
 	if err != nil {
 		g.log.Error("Provider request failed", zap.Error(err))
@@ -147,7 +173,7 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	latency := time.Since(time.Now()).Milliseconds()
+	latency := time.Since(startTime).Milliseconds()
 
 	g.store.LogAudit(agent.ID, "request", map[string]any{
 		"model":     req.Model,
@@ -314,6 +340,170 @@ func (g *Gateway) adminMessagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(messages)
+}
+
+func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request, agent *models.Agent, session *SessionState, req models.ChatCompletionRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	startTime := time.Now()
+
+	resp, err := g.provider.ChatCompletion(r.Context(), req)
+	if err != nil {
+		g.log.Error("Provider request failed", zap.Error(err))
+		fmt.Fprintf(w, "data: {\"error\": %q}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	latency := time.Since(startTime).Milliseconds()
+
+	g.store.LogAudit(agent.ID, "request", map[string]any{
+		"model":     req.Model,
+		"messages":  req.Messages,
+		"tools":     req.Tools,
+		"stream":    true,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Send the response as SSE chunks
+	respBytes, _ := json.Marshal(resp)
+	fmt.Fprintf(w, "data: %s\n\n", respBytes)
+	flusher.Flush()
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+
+	g.store.LogAudit(agent.ID, "response", map[string]any{
+		"model":      resp.Model,
+		"choices":    resp.Choices,
+		"tokens_in":  resp.Usage.PromptTokens,
+		"tokens_out": resp.Usage.CompletionTokens,
+		"latency_ms": latency,
+		"stream":     true,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+	})
+
+	if len(resp.Choices) > 0 {
+		session.Messages = append(session.Messages, models.Message{
+			Role:      "assistant",
+			Content:   resp.Choices[0].Message.Content,
+			ToolCalls: resp.Choices[0].Message.ToolCalls,
+		})
+		g.updateSession(session)
+		g.store.AppendMessage(session.ID, &models.Message{
+			Role:      "assistant",
+			Content:   resp.Choices[0].Message.Content,
+			ToolCalls: resp.Choices[0].Message.ToolCalls,
+		}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, int(latency))
+	}
+}
+
+func (g *Gateway) adminEventsHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	sessionID := vars["session_id"]
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Send existing messages first
+	messages, err := g.store.GetSessionMessages(sessionID)
+	if err != nil {
+		fmt.Fprintf(w, "data: {\"error\": %q}\n\n", err.Error())
+		flusher.Flush()
+		return
+	}
+
+	for _, msg := range messages {
+		msgBytes, _ := json.Marshal(msg)
+		fmt.Fprintf(w, "data: %s\n\n", msgBytes)
+	}
+	flusher.Flush()
+
+	// Poll for new messages
+	lastCount := len(messages)
+	ctx := r.Context()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			messages, err := g.store.GetSessionMessages(sessionID)
+			if err != nil {
+				continue
+			}
+			if len(messages) > lastCount {
+				for _, msg := range messages[lastCount:] {
+					msgBytes, _ := json.Marshal(msg)
+					fmt.Fprintf(w, "data: %s\n\n", msgBytes)
+				}
+				flusher.Flush()
+				lastCount = len(messages)
+			}
+		}
+	}
+}
+
+func (g *Gateway) adminCreateAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExerciseID string `json:"exercise_id"`
+		Hostname   string `json:"hostname"`
+		APIKey     string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.ExerciseID == "" || req.APIKey == "" {
+		http.Error(w, "exercise_id and api_key are required", http.StatusBadRequest)
+		return
+	}
+
+	agent, err := g.store.CreateAgent(req.ExerciseID, req.APIKey, req.Hostname)
+	if err != nil {
+		g.log.Error("Failed to create agent", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(agent)
+}
+
+func (g *Gateway) adminDeleteAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	apiKey := vars["api_key"]
+
+	if err := g.store.DeleteAgentByAPIKey(apiKey); err != nil {
+		if err == db.ErrNotFound {
+			http.Error(w, "API key not found", http.StatusNotFound)
+			return
+		}
+		g.log.Error("Failed to delete agent", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (g *Gateway) adminLogsHandler(w http.ResponseWriter, r *http.Request) {

@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -84,12 +87,36 @@ func generateRandomID() string {
 	return fmt.Sprintf("%x", time.Now().UnixNano())[:8]
 }
 
+// computeFileHash returns the SHA-256 hex digest of a file.
+func computeFileHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// computeEmbedHash returns the SHA-256 hex digest of an embedded file.
+func computeEmbedHash(fs embed.FS, path string) (string, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func (cr *CleanRoom) setupTools() error {
 	// Extract busybox
 	busyBoxPath := filepath.Join(cr.WorkDir, "busybox")
-	if err := extractFile(busyBoxFS, "tools/bin/busybox", busyBoxPath); err != nil {
+	bbSrc := "tools/bin/busybox"
+	bbFS := busyBoxFS
+	if err := extractFile(bbFS, bbSrc, busyBoxPath); err != nil {
 		// Try to extract from tools directory
-		if err := extractFile(toolsFS, "tools/busybox", busyBoxPath); err != nil {
+		bbSrc = "tools/busybox"
+		bbFS = toolsFS
+		if err := extractFile(toolsFS, bbSrc, busyBoxPath); err != nil {
 			return fmt.Errorf("failed to extract busybox: %w", err)
 		}
 	}
@@ -98,7 +125,13 @@ func (cr *CleanRoom) setupTools() error {
 		return fmt.Errorf("failed to chmod busybox: %w", err)
 	}
 	cr.ToolPaths["busybox"] = busyBoxPath
-	cr.ToolHashes["busybox"] = "placeholder-sha256" // Will be replaced with actual hash
+
+	// Compute and verify checksum
+	expectedHash, _ := computeEmbedHash(bbFS, bbSrc)
+	cr.ToolHashes["busybox"] = expectedHash
+	if err := cr.verifyTool("busybox"); err != nil {
+		return err
+	}
 
 	// Extract linpeas
 	linpeasPath := filepath.Join(cr.WorkDir, "linpeas.sh")
@@ -109,19 +142,24 @@ func (cr *CleanRoom) setupTools() error {
 		return fmt.Errorf("failed to chmod linpeas: %w", err)
 	}
 	cr.ToolPaths["linpeas"] = linpeasPath
+	cr.ToolHashes["linpeas"], _ = computeEmbedHash(toolsFS, "tools/linpeas.sh")
+	if err := cr.verifyTool("linpeas"); err != nil {
+		return err
+	}
 
 	// Extract pspy
 	pspyPath := filepath.Join(cr.WorkDir, "pspy")
+	pspySrc := "tools/pspy64"
 	if runtime.GOARCH == "amd64" {
 		if err := extractFile(toolsFS, "tools/pspy64", pspyPath); err != nil {
-			// Try pspy32
 			pspyPath = filepath.Join(cr.WorkDir, "pspy32")
-			if err := extractFile(toolsFS, "tools/pspy32", pspyPath); err != nil {
+			pspySrc = "tools/pspy"
+			if err := extractFile(toolsFS, "tools/pspy", pspyPath); err != nil {
 				return fmt.Errorf("failed to extract pspy: %w", err)
 			}
 		}
 	} else {
-		pspyPath = filepath.Join(cr.WorkDir, "pspy")
+		pspySrc = "tools/pspy"
 		if err := extractFile(toolsFS, "tools/pspy", pspyPath); err != nil {
 			return fmt.Errorf("failed to extract pspy: %w", err)
 		}
@@ -130,6 +168,10 @@ func (cr *CleanRoom) setupTools() error {
 		return fmt.Errorf("failed to chmod pspy: %w", err)
 	}
 	cr.ToolPaths["pspy"] = pspyPath
+	cr.ToolHashes["pspy"], _ = computeEmbedHash(toolsFS, pspySrc)
+	if err := cr.verifyTool("pspy"); err != nil {
+		return err
+	}
 
 	// Create symlink farm using busybox --install
 	cmd := exec.Command(busyBoxPath, "--install", "-s", cr.WorkDir)
@@ -137,6 +179,25 @@ func (cr *CleanRoom) setupTools() error {
 		return fmt.Errorf("failed to create busybox symlinks: %w (output: %s)", err, output)
 	}
 
+	return nil
+}
+
+// verifyTool checks that an extracted tool's SHA-256 matches the expected hash.
+func (cr *CleanRoom) verifyTool(name string) error {
+	path := cr.ToolPaths[name]
+	expected := cr.ToolHashes[name]
+	if path == "" || expected == "" {
+		return nil
+	}
+
+	actual, err := computeFileHash(path)
+	if err != nil {
+		return fmt.Errorf("failed to hash %s: %w", name, err)
+	}
+
+	if actual != expected {
+		return fmt.Errorf("integrity check failed for %s: expected %s, got %s", name, expected, actual)
+	}
 	return nil
 }
 
@@ -158,10 +219,31 @@ func (cr *CleanRoom) GetToolPath(name string) string {
 	return cr.ToolPaths[name]
 }
 
-func (cr *CleanRoom) ExecuteTrusted(command string, args []string) (string, string, int, error) {
-	cmd := exec.Command(command, args...)
+// DefaultTimeout is the default per-command execution timeout.
+const DefaultTimeout = 120 * time.Second
 
-	// Sanitize environment
+// LongTimeout is for long-running tools like linpeas and pspy.
+const LongTimeout = 600 * time.Second
+
+// ExecuteTrusted runs a command in the Clean Room with the default timeout.
+func (cr *CleanRoom) ExecuteTrusted(command string, args []string) (string, string, int, error) {
+	return cr.ExecuteTrustedWithTimeout(command, args, DefaultTimeout)
+}
+
+// ExecuteTrustedLong runs a command with the extended timeout (for linpeas, pspy).
+func (cr *CleanRoom) ExecuteTrustedLong(command string, args []string) (string, string, int, error) {
+	return cr.ExecuteTrustedWithTimeout(command, args, LongTimeout)
+}
+
+// ExecuteTrustedWithTimeout runs a command in the sanitized Clean Room environment
+// with the specified timeout.
+func (cr *CleanRoom) ExecuteTrustedWithTimeout(command string, args []string, timeout time.Duration) (string, string, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, command, args...)
+
+	// Sanitize environment — whitelist approach
 	cmd.Env = []string{
 		"PATH=" + cr.WorkDir,
 		"HOME=/root",
@@ -190,6 +272,9 @@ func (cr *CleanRoom) ExecuteTrusted(command string, args []string) (string, stri
 	err = cmd.Wait()
 	exitCode := 0
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return string(outBytes), string(errBytes), -1, fmt.Errorf("command timed out after %s", timeout)
+		}
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode = exitError.ExitCode()
 		}

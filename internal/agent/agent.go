@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,20 +15,24 @@ import (
 
 // Agent represents the JAGR agent instance
 type Agent struct {
-	gatewayURL  string
-	apiKey      string
-	mode        string
-	maxIter     int
-	model       string
-	objective   string
-	outputDir   string
-	logger      *zap.Logger
-	cleanRoom   *CleanRoom
+	gatewayURL     string
+	apiKey         string
+	mode           string
+	maxIter        int
+	maxTokens      int
+	model          string
+	objective      string
+	outputDir      string
+	logger         *zap.Logger
+	cleanRoom      *CleanRoom
 
-	conversation []Message
-	iterations   int
-	findings     []Finding
-	startTime    time.Time
+	conversation   []Message
+	iterations     int
+	totalTokensIn  int
+	totalTokensOut int
+	findings       []Finding
+	startTime      time.Time
+	concluded      bool
 }
 
 type Message struct {
@@ -53,12 +58,16 @@ type FindingSummary struct {
 	Info     int `json:"info"`
 }
 
-func NewAgent(gatewayURL, apiKey, mode string, maxIter int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom) (*Agent, error) {
+func NewAgent(gatewayURL, apiKey, mode string, maxIter, maxTokens int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom) (*Agent, error) {
+	if maxTokens == 0 {
+		maxTokens = 500000
+	}
 	return &Agent{
 		gatewayURL: gatewayURL,
 		apiKey:     apiKey,
 		mode:       mode,
 		maxIter:    maxIter,
+		maxTokens:  maxTokens,
 		model:      model,
 		objective:  objective,
 		outputDir:  outputDir,
@@ -80,9 +89,32 @@ func (a *Agent) Run() error {
 	a.conversation = append(a.conversation, Message{Role: "system", Content: systemPrompt})
 
 	for a.iterations < a.maxIter {
+		// Token budget guard
+		totalTokens := a.totalTokensIn + a.totalTokensOut
+		if totalTokens > a.maxTokens {
+			a.logger.Info("Token budget exceeded, concluding",
+				zap.Int("total_tokens", totalTokens),
+				zap.Int("max_tokens", a.maxTokens))
+			return a.conclude("Token budget exceeded")
+		}
+
 		toolCalls, err := a.think()
 		if err != nil {
 			return fmt.Errorf("thinking failed: %w", err)
+		}
+
+		if a.concluded {
+			return nil
+		}
+
+		// Interactive mode: present proposed actions and wait for approval
+		if a.mode == "interactive" {
+			if approved, hint := a.promptOperator(toolCalls); !approved {
+				if hint != "" {
+					a.conversation = append(a.conversation, Message{Role: "user", Content: hint})
+				}
+				continue
+			}
 		}
 
 		results, err := a.act(toolCalls)
@@ -93,10 +125,41 @@ func (a *Agent) Run() error {
 		if err := a.observe(results); err != nil {
 			return fmt.Errorf("observation failed: %w", err)
 		}
+
+		if a.concluded {
+			return nil
+		}
 	}
 
 	a.logger.Info("Max iterations reached, concluding")
 	return a.conclude("Maximum iterations reached")
+}
+
+// promptOperator presents the proposed tool calls to the operator and waits for approval.
+// Returns (approved, hint). If not approved and hint is non-empty, the hint is injected
+// as a user message into the conversation.
+func (a *Agent) promptOperator(toolCalls []ToolCall) (bool, string) {
+	fmt.Println("\n--- Proposed Actions ---")
+	for i, tc := range toolCalls {
+		fmt.Printf("[%d] %s(%s)\n", i+1, tc.Function.Name, tc.Function.Arguments)
+	}
+	fmt.Print("\nApprove? [y]es / [n]o / [h]int: ")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return false, ""
+	}
+
+	input := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	switch {
+	case input == "y" || input == "yes" || input == "":
+		return true, ""
+	case input == "n" || input == "no":
+		return false, ""
+	default:
+		// Treat any other input as a hint
+		return false, input
+	}
 }
 
 func (a *Agent) hostname() string {
@@ -173,6 +236,16 @@ func (a *Agent) think() ([]ToolCall, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
+	// Track token usage
+	if usage, ok := reply["usage"].(map[string]any); ok {
+		if promptTokens, ok := usage["prompt_tokens"].(float64); ok {
+			a.totalTokensIn += int(promptTokens)
+		}
+		if completionTokens, ok := usage["completion_tokens"].(float64); ok {
+			a.totalTokensOut += int(completionTokens)
+		}
+	}
+
 	if choices, ok := reply["choices"].([]any); ok && len(choices) > 0 {
 		choice, _ := choices[0].(map[string]any)
 		if msg, ok := choice["message"].(map[string]any); ok {
@@ -187,16 +260,24 @@ func (a *Agent) think() ([]ToolCall, error) {
 				for _, tc := range toolCalls {
 					if tcMap, ok := tc.(map[string]any); ok {
 						result = append(result, ToolCall{
-							ID: tcMap["id"].(string),
+							ID:   tcMap["id"].(string),
 							Type: tcMap["type"].(string),
 							Function: Function{
-								Name: tcMap["function"].(map[string]any)["name"].(string),
+								Name:      tcMap["function"].(map[string]any)["name"].(string),
 								Arguments: tcMap["function"].(map[string]any)["arguments"].(string),
 							},
 						})
 					}
 				}
 				return result, nil
+			}
+
+			// No tool calls — LLM wants to finish without calling conclude
+			if content != "" {
+				a.logger.Info("LLM responded without tool calls, concluding")
+				a.concluded = true
+				a.conclude(content)
+				return nil, nil
 			}
 		}
 	}
@@ -370,7 +451,7 @@ func (a *Agent) execLinpeasSh(tc ToolCall, args map[string]any) (ToolResult, err
 		return ToolResult{}, fmt.Errorf("linpeas script not found")
 	}
 
-	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrusted(scriptPath, []string{flags})
+	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrustedLong(scriptPath, []string{flags})
 	content := stdout + "\n" + stderr
 	content = FilterLinPEASOutput(content)
 
@@ -393,7 +474,7 @@ func (a *Agent) execLinpeasStatic(tc ToolCall, args map[string]any) (ToolResult,
 		return a.execLinpeasSh(tc, args)
 	}
 
-	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrusted(staticPath, []string{flags})
+	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrustedLong(staticPath, []string{flags})
 	content := stdout + "\n" + stderr
 	content = FilterLinPEASOutput(content)
 
@@ -416,7 +497,7 @@ func (a *Agent) execPspy(tc ToolCall, args map[string]any) (ToolResult, error) {
 		return ToolResult{}, fmt.Errorf("pspy not found")
 	}
 
-	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrusted(pspyPath, []string{"-d", fmt.Sprintf("%d", duration)})
+	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrustedLong(pspyPath, []string{"-d", fmt.Sprintf("%d", duration)})
 	content := stdout + "\n" + stderr
 	content = DeduplicatepspyEvents(content)
 
@@ -536,6 +617,9 @@ func (a *Agent) execConclude(tc ToolCall, args map[string]any) (ToolResult, erro
 		summary = "Investigation complete"
 	}
 
+	a.concluded = true
+	a.conclude(summary)
+
 	return ToolResult{
 		ToolID:  tc.ID,
 		Name:    tc.Function.Name,
@@ -591,6 +675,7 @@ func (a *Agent) generateReports(summary string) error {
 			Mode:         a.mode,
 			Model:        a.model,
 			Iterations:   a.iterations,
+		TotalTokens:  a.totalTokensIn + a.totalTokensOut,
 		},
 		Findings: a.findings,
 		Summary:  a.buildSummary(),

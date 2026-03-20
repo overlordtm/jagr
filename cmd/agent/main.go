@@ -17,6 +17,7 @@ func main() {
 	apiKey := agentCmd.String("api-key", "", "API key for gateway auth (or JAGR_API_KEY env)")
 	mode := agentCmd.String("mode", "interactive", "Execution mode: batch | interactive")
 	maxIterations := agentCmd.Int("max-iterations", 50, "Maximum ReAct loop iterations")
+	maxTokens := agentCmd.Int("max-tokens", 500000, "Maximum total tokens consumed before concluding")
 	model := agentCmd.String("model", "default", "Model alias to request from gateway")
 	objective := agentCmd.String("objective", "", "Custom objective prompt")
 	outputDir := agentCmd.String("output-dir", "./jagr-output", "Directory for reports")
@@ -98,6 +99,7 @@ func main() {
 		*apiKey,
 		*mode,
 		*maxIterations,
+		*maxTokens,
 		*model,
 		*objective,
 		*outputDir,

@@ -399,6 +399,21 @@ func (s *Store) GetEventsForSession(sessionID string) ([]models.MessageLog, erro
 	return s.GetSessionMessages(sessionID)
 }
 
+func (s *Store) DeleteAgentByAPIKey(apiKey string) error {
+	result, err := s.db.Exec(`DELETE FROM agents WHERE api_key = ?`, apiKey)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
 	var sess models.Session
 	err := s.db.QueryRow(`
