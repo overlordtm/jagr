@@ -60,17 +60,29 @@ Jagr is an autonomous, AI-driven security engineer designed for deep inspection 
 - **Multi-Agent Support** — Central gateway manages multiple concurrent agents
 - **Full Audit Trail** — SQLite-based logging of all activities
 - **Intelligent Tooling** — ReAct loop with LinPEAS, pspy, and custom tools
+- **Web Dashboard** — Real-time monitoring of exercises, agents, sessions, and cost tracking
+- **Cost Tracking** — Automatic per-model pricing via OpenRouter with per-session cost aggregation
+- **ACME / Auto-TLS** — Optional Let's Encrypt integration; auto-generates self-signed certs as fallback
+- **Circuit Breaker** — Per-tool failure tracking prevents runaway loops on broken tools
+- **Session Heartbeats** — Agents send periodic heartbeats so the gateway can detect stale sessions
 
 ## Building
 
 ```bash
-# Build both binaries
-go build -o jagr-gateway ./cmd/gateway
-go build -o jagr-agent ./cmd/agent
+# Fetch embedded tools and build both binaries
+make all
 
-# Or build everything
-go build ./...
+# Or build individually
+make build-agent
+make build-gateway
+
+# Fetch tools separately (BusyBox is built from source via submodule)
+make fetch-tools
 ```
+
+Binaries are output to `dist/`. The Makefile cross-compiles for Linux amd64 by default; override with `GOOS` and `GOARCH`.
+
+The gateway build includes a Vite-based web dashboard (`web/`). The `build-gateway` target runs `build-dashboard` automatically.
 
 ## Gateway Server
 
@@ -84,6 +96,12 @@ server:
   tls:
     cert: /etc/jagr/server.crt
     key: /etc/jagr/server.key
+    # Optional ACME (Let's Encrypt) automatic TLS:
+    # acme:
+    #   enabled: true
+    #   email: admin@example.com
+    #   domains: [jagr.example.com]
+    #   cache_dir: /var/lib/jagr/acme
 
 database:
   path: /var/lib/jagr/jagr.db
@@ -94,7 +112,10 @@ rate_limit:
 
 session:
   timeout_minutes: 120
-  history_mode: gateway
+  max_tokens_per_session: 500000
+
+# Shared API key for agent authentication (agents identify by hostname)
+agent_api_key: ${JAGR_AGENT_API_KEY}
 
 providers:
   - name: openrouter
@@ -107,6 +128,21 @@ providers:
 
 default_provider: openrouter
 default_model: default
+
+dashboard:
+  enabled: true
+  listen: ":8080"
+  # users:          # optional basic auth
+  #   - username: admin
+  #     password: changeme
+
+timeouts:
+  provider_timeout_seconds: 300
+  pricing_fetch_timeout_seconds: 30
+
+logging:
+  level: info
+  audit: true
 ```
 
 ### Running
@@ -116,10 +152,10 @@ default_model: default
 ./jagr-gateway
 
 # With custom config
-./jagr-gateway -config custom.yaml
+./jagr-gateway --config custom.yaml
 
 # Verbose logging
-./jagr-gateway -verbose
+./jagr-gateway --verbose
 ```
 
 ### API Endpoints
@@ -138,35 +174,52 @@ default_model: default
 - `GET /admin/agents/{id}/sessions/{sid}/messages` — Get session messages
 - `GET /admin/agents/{id}/logs` — Get audit logs
 
+#### Web Dashboard
+
+When `dashboard.enabled` is `true`, the gateway serves a web UI on the configured `dashboard.listen` address (default `:8080`). The dashboard provides real-time views of exercises, agents, sessions, messages, and cost summaries. Optional basic-auth can be configured via `dashboard.users`.
+
 ## Agent
 
 ### Usage
 
 ```bash
-jagr [flags]
+jagr-agent [flags]
 
 Flags:
-  --gateway-url    string    Gateway server URL (required)
-  --api-key        string    API key for gateway auth (or JAGR_API_KEY env)
-  --mode           string    Execution mode: batch | interactive (default: interactive)
-  --max-iterations int       Maximum ReAct loop iterations (default: 50)
-  --model          string    Model alias to request from gateway (default: "default")
-  --objective      string    Custom objective prompt
-  --output-dir     string    Directory for reports (default: ./jagr-output)
-  --verbose        bool      Verbose local logging (default: false)
+  --gateway-url          string   Gateway server URL (required, or JAGR_GATEWAY_URL env)
+  --api-key              string   API key for gateway auth (or JAGR_API_KEY env)
+  --mode                 string   Execution mode: batch | interactive (default: interactive)
+  --max-iterations       int      Maximum ReAct loop iterations (default: 50)
+  --max-tool-failures    int      Max consecutive failures per tool before circuit breaker trips (default: 5)
+  --model                string   Model alias to request from gateway (default: "default")
+  --objective            string   Custom objective prompt
+  --output-dir           string   Directory for reports (default: ./jagr-output)
+  --verbose              bool     Verbose local logging (default: false)
+  --hostname             string   Override hostname detection
+  --tls-skip-verify      bool     Skip TLS certificate verification (default: false)
+  --http-timeout         int      HTTP request timeout in seconds (default: 120)
+  --command-timeout       int      Default command execution timeout in seconds (default: 300)
+  --long-command-timeout  int      Long-running command timeout in seconds (default: 900)
 ```
 
 ### Examples
 
 ```bash
 # Run autonomous audit
-JAGR_API_KEY=your-api-key ./jagr-agent --gateway-url https://gateway.example.com --mode batch
+JAGR_API_KEY=your-api-key jagr-agent --gateway-url https://gateway.example.com --mode batch
 
 # Interactive mode with human oversight
-./jagr-agent --gateway-url https://gateway.example.com --mode interactive
+jagr-agent --gateway-url https://gateway.example.com --api-key $KEY --mode interactive
 
-# Custom objective
-./jagr-agent --gateway-url https://gateway.example.com --objective "Look for SSH backdoors in /root/.ssh"
+# Custom objective with self-signed gateway cert
+jagr-agent --gateway-url https://gateway.example.com --api-key $KEY \
+  --tls-skip-verify --objective "Look for SSH backdoors in /root/.ssh"
+
+# Environment variables (alternative to flags)
+export JAGR_GATEWAY_URL=https://gateway.example.com
+export JAGR_API_KEY=your-api-key
+export JAGR_TLS_SKIP_VERIFY=true
+jagr-agent --mode batch
 ```
 
 ### Command Reference
@@ -188,9 +241,9 @@ JAGR_API_KEY=your-api-key ./jagr-agent --gateway-url https://gateway.example.com
 
 ## Embedded Tools
 
-- **BusyBox** — Static coreutils with symlink farm
-- **LinPEAS** — Privilege escalation checks (shell + static)
-- **pspy** — Process monitoring (amd64/32)
+- **BusyBox** — Static coreutils built from source (submodule in `external/busybox`) with symlink farm
+- **LinPEAS** — Privilege escalation checks (downloaded at build time via `make fetch-tools`)
+- **pspy** — Process monitoring (downloaded at build time)
 
 Tools are embedded via Go's `embed.FS` and extracted at runtime to the Clean Room.
 
@@ -234,22 +287,23 @@ At conclusion, the agent produces:
 ```
 jagr/
 ├── cmd/
-│   ├── gateway/          # Gateway server entry point
-│   └── agent/            # Agent entry point
+│   ├── gateway/            # Gateway server entry point
+│   └── agent/              # Agent entry point
 ├── internal/
-│   ├── gateway/          # Gateway components
-│   │   ├── db/           # SQLite storage
-│   │   ├── models/       # Data models
-│   │   ├── provider/     # LLM provider routing
-│   │   └── ratelimit.go # Rate limiting
-│   └── agent/            # Agent components
-│       ├── cleanroom.go  # Trusted execution
-│       ├── tools.go      # Tool definitions
-│       └── agent.go      # ReAct engine
-├── pkg/                  # Shared packages
-├── embed/                # Embedded resources
-├── gateway.yaml.example  # Config template
-└── PLAN.md               # Architecture spec
+│   ├── gateway/            # Gateway components
+│   │   ├── db/             # SQLite storage
+│   │   ├── models/         # Data models & config
+│   │   ├── provider/       # LLM provider routing & pricing
+│   │   └── dashboard/      # Web dashboard (embedded HTML/JS/CSS)
+│   └── agent/              # Agent components
+│       ├── cleanroom.go    # Trusted execution
+│       ├── tools.go        # Tool definitions
+│       └── agent.go        # ReAct engine
+├── external/
+│   └── busybox/            # BusyBox submodule (built from source)
+├── web/                    # Dashboard frontend (Vite + JS)
+├── Makefile                # Build, fetch-tools, cross-compile
+└── gateway.yaml.example    # Config template
 ```
 
 ### Adding New Tools
