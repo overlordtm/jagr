@@ -16,17 +16,18 @@ func main() {
 		apiKey        string
 		mode          string
 		maxIterations int
-		maxTokens     int
 		model         string
 		objective     string
 		outputDir     string
 		verbose       bool
 		hostname      string
+		tlsSkipVerify bool
 	)
 
 	rootCmd := &cobra.Command{
-		Use:   "jagr-agent",
-		Short: "JAGR security assessment agent",
+		Use:          "jagr-agent",
+		Short:        "JAGR security assessment agent",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Build logger
 			level := zap.InfoLevel
@@ -85,12 +86,12 @@ func main() {
 				apiKey,
 				mode,
 				maxIterations,
-				maxTokens,
 				model,
 				objective,
 				outputDir,
 				logger,
 				cleanRoom,
+				tlsSkipVerify,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to create agent: %w", err)
@@ -105,12 +106,12 @@ func main() {
 	flags.StringVar(&apiKey, "api-key", "", "API key for gateway auth")
 	flags.StringVar(&mode, "mode", "interactive", "Execution mode: batch | interactive")
 	flags.IntVar(&maxIterations, "max-iterations", 50, "Maximum ReAct loop iterations")
-	flags.IntVar(&maxTokens, "max-tokens", 500000, "Maximum total tokens consumed before concluding")
-	flags.StringVar(&model, "model", "default", "Model alias to request from gateway")
+flags.StringVar(&model, "model", "default", "Model alias to request from gateway")
 	flags.StringVar(&objective, "objective", "", "Custom objective prompt")
 	flags.StringVar(&outputDir, "output-dir", "./jagr-output", "Directory for reports")
 	flags.BoolVar(&verbose, "verbose", false, "Verbose local logging")
 	flags.StringVar(&hostname, "hostname", "", "Override hostname detection")
+	flags.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS certificate verification (trust self-signed certs)")
 
 	// Bind env vars
 	rootCmd.PreRun = func(cmd *cobra.Command, args []string) {
@@ -122,6 +123,11 @@ func main() {
 		if !cmd.Flags().Changed("api-key") {
 			if v := os.Getenv("JAGR_API_KEY"); v != "" {
 				apiKey = v
+			}
+		}
+		if !cmd.Flags().Changed("tls-skip-verify") {
+			if v := os.Getenv("JAGR_TLS_SKIP_VERIFY"); v == "1" || v == "true" {
+				tlsSkipVerify = true
 			}
 		}
 	}

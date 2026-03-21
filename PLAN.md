@@ -236,9 +236,6 @@ server:
   tls:
     cert: /etc/jagr/server.crt
     key: /etc/jagr/server.key
-    # Optional: mTLS for admin API
-    client_ca: /etc/jagr/ca.crt
-
 database:
   path: /var/lib/jagr/jagr.db
 

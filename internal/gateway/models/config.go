@@ -5,6 +5,7 @@ type Config struct {
 	Database  DatabaseConfig  `yaml:"database"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Session   SessionConfig   `yaml:"session"`
+	AgentAPIKey string        `yaml:"agent_api_key"`
 	Providers []ProviderConfig `yaml:"providers"`
 	DefaultProvider string     `yaml:"default_provider"`
 	DefaultModel    string     `yaml:"default_model"`
@@ -17,10 +18,9 @@ type ServerConfig struct {
 }
 
 type TLSConfig struct {
-	Cert     string     `yaml:"cert"`
-	Key      string     `yaml:"key"`
-	ClientCA string     `yaml:"client_ca,omitempty"`
-	ACME     ACMEConfig `yaml:"acme,omitempty"`
+	Cert string     `yaml:"cert"`
+	Key  string     `yaml:"key"`
+	ACME ACMEConfig `yaml:"acme,omitempty"`
 }
 
 type ACMEConfig struct {
@@ -41,8 +41,9 @@ type RateLimitConfig struct {
 }
 
 type SessionConfig struct {
-	TimeoutMinutes int    `yaml:"timeout_minutes"`
-	HistoryMode    string `yaml:"history_mode"`
+	TimeoutMinutes      int    `yaml:"timeout_minutes"`
+	HistoryMode         string `yaml:"history_mode"`
+	MaxTokensPerSession int    `yaml:"max_tokens_per_session"`
 }
 
 type ProviderConfig struct {
@@ -54,8 +55,9 @@ type ProviderConfig struct {
 }
 
 type ModelMapping struct {
-	Alias    string `yaml:"alias"`
-	Upstream string `yaml:"upstream"`
+	Alias      string         `yaml:"alias"`
+	Upstream   string         `yaml:"upstream"`
+	ExtraBody  map[string]any `yaml:"extra_body,omitempty"`
 }
 
 type LoggingConfig struct {

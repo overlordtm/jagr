@@ -1,9 +1,8 @@
-.PHONY: all build build-agent build-gateway test clean tools fetch-tools patch-busybox
+.PHONY: all build build-agent build-gateway test clean tools fetch-tools patch-busybox build-busybox
 
 AGENT_BIN   := dist/jagr-agent
 GATEWAY_BIN := dist/jagr-gateway
 TOOLS_DIR   := internal/agent/tools
-TOOLS_BIN   := $(TOOLS_DIR)/bin
 
 # Tool versions (override via environment or make args)
 BUSYBOX_VERSION  ?= 1.36.1
@@ -42,19 +41,18 @@ patch-busybox:
 		fi; \
 	done
 
-fetch-busybox:
-	@mkdir -p $(TOOLS_BIN)
-	@if [ ! -f $(TOOLS_BIN)/busybox ] || [ "$$(wc -c < $(TOOLS_BIN)/busybox)" -lt 1024 ]; then \
-		echo "Downloading BusyBox $(BUSYBOX_VERSION) ($(GOARCH))..."; \
-		ARCH=$(GOARCH); \
-		if [ "$$ARCH" = "amd64" ]; then ARCH="x86_64"; fi; \
-		if [ "$$ARCH" = "arm64" ]; then ARCH="aarch64"; fi; \
-		curl -fsSL --connect-timeout 10 --max-time 120 "https://busybox.net/downloads/binaries/$(BUSYBOX_VERSION)-defconfig-multiarch-musl/busybox-$$ARCH" \
-			-o $(TOOLS_BIN)/busybox || { echo "ERROR: BusyBox download failed"; exit 1; }; \
-		chmod +x $(TOOLS_BIN)/busybox; \
-		echo "BusyBox downloaded."; \
+build-busybox: patch-busybox
+	@cp external/busybox-config external/busybox/.config
+	@$(MAKE) -C external/busybox -j$$(nproc)
+
+fetch-busybox: build-busybox
+	@mkdir -p $(TOOLS_DIR)
+	@if [ ! -f $(TOOLS_DIR)/busybox ] || [ external/busybox/busybox -nt $(TOOLS_DIR)/busybox ]; then \
+		echo "Copying BusyBox binary to $(TOOLS_DIR)..."; \
+		cp external/busybox/busybox $(TOOLS_DIR)/busybox; \
+		echo "BusyBox updated."; \
 	else \
-		echo "BusyBox already present, skipping."; \
+		echo "BusyBox already up to date, skipping."; \
 	fi
 
 fetch-linpeas:

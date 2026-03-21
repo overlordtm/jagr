@@ -28,11 +28,12 @@ type Gateway struct {
 }
 
 type SessionState struct {
-	ID          string
-	AgentID     string
-	HistoryMode string
-	Messages    []models.Message
+	ID           string
+	AgentID      string
+	HistoryMode  string
+	Messages     []models.Message
 	LastActivity time.Time
+	TotalTokens  int
 }
 
 func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
@@ -89,20 +90,38 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/v1/chat/completions", g.chatCompletionsHandler).Methods("POST")
 	router.HandleFunc("/v1/models", g.modelsHandler).Methods("GET")
 
-	router.HandleFunc("/admin/exercises", g.adminExercisesHandler).Methods("GET")
-	router.HandleFunc("/admin/exercises/{exercise_id}/agents", g.adminAgentsHandler).Methods("GET")
+	router.HandleFunc("/admin/agents", g.adminAgentsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions", g.adminSessionsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions/{session_id}/messages", g.adminMessagesHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions/{session_id}/events", g.adminEventsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/logs", g.adminLogsHandler).Methods("GET")
-	router.HandleFunc("/admin/api-keys", g.adminCreateAPIKeyHandler).Methods("POST")
-	router.HandleFunc("/admin/api-keys/{api_key}", g.adminDeleteAPIKeyHandler).Methods("DELETE")
 }
 
 func (g *Gateway) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (g *Gateway) authenticateAgent(r *http.Request) (*models.Agent, error) {
+	apiKey := r.Header.Get("Authorization")
+	if apiKey != "" {
+		apiKey = strings.TrimPrefix(apiKey, "Bearer ")
+	}
+	if apiKey == "" {
+		apiKey = r.URL.Query().Get("api-key")
+	}
+
+	if apiKey != g.config.AgentAPIKey {
+		return nil, fmt.Errorf("invalid API key")
+	}
+
+	hostname := r.Header.Get("X-Hostname")
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	return g.store.FindOrCreateAgentByHostname(hostname)
 }
 
 func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -113,26 +132,18 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	apiKey := r.Header.Get("Authorization")
-	if apiKey != "" {
-		apiKey = strings.TrimPrefix(apiKey, "Bearer ")
-	}
-
-	if apiKey == "" {
-		apiKey = r.URL.Query().Get("api-key")
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		g.log.Error("Authentication failed", zap.Error(err))
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
 	}
 
 	g.log.Info("Received chat completions request",
 		zap.String("model", req.Model),
 		zap.Int("messages", len(req.Messages)),
-		zap.Bool("stream", req.Stream))
-
-	agent, err := g.store.FindAgentByAPIKey(apiKey)
-	if err != nil {
-		g.log.Error("Invalid API key", zap.Error(err))
-		http.Error(w, "invalid API key", http.StatusUnauthorized)
-		return
-	}
+		zap.Bool("stream", req.Stream),
+		zap.String("hostname", agent.Hostname))
 
 	// Enforce rate limiting
 	if !g.rateLimiter.Allow(agent.ID) {
@@ -158,6 +169,24 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 
 	session := g.sessions[sessionID]
 
+	// Enforce per-session token budget
+	if maxTok := g.config.Session.MaxTokensPerSession; maxTok > 0 && session.TotalTokens >= maxTok {
+		g.log.Warn("Session token budget exceeded",
+			zap.String("session_id", session.ID),
+			zap.Int("total_tokens", session.TotalTokens),
+			zap.Int("max_tokens", maxTok))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorInfo{
+				Message: fmt.Sprintf("session token budget exceeded (%d/%d)", session.TotalTokens, maxTok),
+				Type:    "token_budget_error",
+				Code:    "token_budget_exceeded",
+			},
+		})
+		return
+	}
+
 	reqWithHistory, err := g.buildRequestWithHistory(req, session)
 	if err != nil {
 		g.log.Error("Failed to build request", zap.Error(err))
@@ -175,7 +204,15 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 	resp, err := g.provider.ChatCompletion(r.Context(), reqWithHistory)
 	if err != nil {
 		g.log.Error("Provider request failed", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorInfo{
+				Message: err.Error(),
+				Type:    "provider_error",
+				Code:    "provider_request_failed",
+			},
+		})
 		return
 	}
 
@@ -202,6 +239,10 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		Content:   resp.Choices[0].Message.Content,
 		ToolCalls: resp.Choices[0].Message.ToolCalls,
 	})
+
+	if resp.Usage != nil {
+		session.TotalTokens += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+	}
 
 	g.updateSession(session)
 
@@ -295,22 +336,8 @@ func (g *Gateway) modelsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (g *Gateway) adminExercisesHandler(w http.ResponseWriter, r *http.Request) {
-	exercises, err := g.store.GetExercises("")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(exercises)
-}
-
 func (g *Gateway) adminAgentsHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	exerciseID := vars["exercise_id"]
-
-	agents, err := g.store.GetAgents(exerciseID)
+	agents, err := g.store.GetAgents()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -403,6 +430,9 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 			Content:   resp.Choices[0].Message.Content,
 			ToolCalls: resp.Choices[0].Message.ToolCalls,
 		})
+		if resp.Usage != nil {
+			session.TotalTokens += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		}
 		g.updateSession(session)
 		g.store.AppendMessage(session.ID, &models.Message{
 			Role:      "assistant",
@@ -465,51 +495,6 @@ func (g *Gateway) adminEventsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-}
-
-func (g *Gateway) adminCreateAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ExerciseID string `json:"exercise_id"`
-		Hostname   string `json:"hostname"`
-		APIKey     string `json:"api_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if req.ExerciseID == "" || req.APIKey == "" {
-		http.Error(w, "exercise_id and api_key are required", http.StatusBadRequest)
-		return
-	}
-
-	agent, err := g.store.CreateAgent(req.ExerciseID, req.APIKey, req.Hostname)
-	if err != nil {
-		g.log.Error("Failed to create agent", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(agent)
-}
-
-func (g *Gateway) adminDeleteAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	apiKey := vars["api_key"]
-
-	if err := g.store.DeleteAgentByAPIKey(apiKey); err != nil {
-		if err == db.ErrNotFound {
-			http.Error(w, "API key not found", http.StatusNotFound)
-			return
-		}
-		g.log.Error("Failed to delete agent", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (g *Gateway) adminLogsHandler(w http.ResponseWriter, r *http.Request) {

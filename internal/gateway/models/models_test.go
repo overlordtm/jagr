@@ -177,26 +177,12 @@ func TestModelStruct(t *testing.T) {
 	}
 }
 
-func TestExerciseStruct(t *testing.T) {
-	ex := Exercise{
-		ID:        "ex-123",
-		Name:      "Test Exercise",
-		Status:    "active",
-	}
-	
-	if ex.Name != "Test Exercise" {
-		t.Errorf("Expected name Test Exercise, got %s", ex.Name)
-	}
-}
-
 func TestAgentStruct(t *testing.T) {
 	agent := Agent{
-		ID:         "agent-123",
-		ExerciseID: "ex-123",
-		APIKeyHash: "sk-xxx",
-		Hostname:   "test-host",
+		ID:       "agent-123",
+		Hostname: "test-host",
 	}
-	
+
 	if agent.Hostname != "test-host" {
 		t.Errorf("Expected hostname test-host, got %s", agent.Hostname)
 	}

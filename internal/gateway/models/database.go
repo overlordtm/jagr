@@ -4,19 +4,10 @@ import (
 	"time"
 )
 
-type Exercise struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	Status    string    `json:"status"`
-}
-
 type Agent struct {
 	ID        string    `json:"id"`
-	ExerciseID string   `json:"exercise_id"`
-	APIKeyHash string   `json:"-"`
-	Hostname   string    `json:"hostname"`
-	CreatedAt  time.Time `json:"created_at"`
+	Hostname  string    `json:"hostname"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Session struct {

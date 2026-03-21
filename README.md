@@ -1,4 +1,4 @@
-# Jagr (The Hunter) — Autonomous Security Audit Agent v2.0
+# Jagr (Jagr Autonomous Guardian Agent) — Autonomous Security Audit Agent v2.0
 
 **Classification:** Internal / Exercise Use Only  
 **Date:** March 2026

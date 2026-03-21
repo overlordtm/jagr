@@ -47,9 +47,17 @@ go.work
 
 ### Custom ###
 
-jagr-agent
+# testing config
+gateway.yaml 
+
+# built binaries
+dist/
+jagr-agent 
 jagr-server
 
+# jagr output from testing
+jagr-output/
+
+# claude
 .claude/settings.local.json
 
-dist/

@@ -3,7 +3,6 @@ server:
   tls:
     cert: /etc/jagr/server.crt
     key: /etc/jagr/server.key
-    client_ca: /etc/jagr/ca.crt
     # ACME (Let's Encrypt) automatic certificate management
     # When enabled, certificates are obtained and renewed automatically.
     # acme:
@@ -28,6 +27,11 @@ rate_limit:
 session:
   timeout_minutes: 120
   history_mode: gateway
+  max_tokens_per_session: 500000
+
+# Shared API key that all agents use to authenticate with this gateway.
+# Agents identify themselves by hostname, not by key.
+agent_api_key: ${JAGR_AGENT_API_KEY}
 
 providers:
   - name: openrouter

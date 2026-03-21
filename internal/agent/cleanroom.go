@@ -17,9 +17,6 @@ import (
 //go:embed tools/*
 var toolsFS embed.FS
 
-//go:embed tools/bin/*
-var busyBoxFS embed.FS
-
 type CleanRoom struct {
 	WorkDir     string
 	ToolPaths   map[string]string
@@ -73,14 +70,19 @@ func createInShm() (string, error) {
 		return "", fmt.Errorf("failed to create work dir in /dev/shm: %w", err)
 	}
 
-	// Check if executable
+	// Check if executable (writing succeeds on noexec, but executing won't)
 	testPath := filepath.Join(workDir, ".test_exec")
-	if err := os.WriteFile(testPath, []byte{}, 0700); err == nil {
-		os.Remove(testPath)
-		return workDir, nil
+	if err := os.WriteFile(testPath, []byte("#!/bin/sh\n"), 0700); err != nil {
+		os.RemoveAll(workDir)
+		return "", fmt.Errorf("/dev/shm not writable")
+	}
+	defer os.Remove(testPath)
+	if err := exec.Command(testPath).Run(); err != nil {
+		os.RemoveAll(workDir)
+		return "", fmt.Errorf("/dev/shm is noexec")
 	}
 
-	return "", fmt.Errorf("/dev/shm may be noexec")
+	return workDir, nil
 }
 
 func generateRandomID() string {
@@ -110,25 +112,14 @@ func computeEmbedHash(fs embed.FS, path string) (string, error) {
 func (cr *CleanRoom) setupTools() error {
 	// Extract busybox
 	busyBoxPath := filepath.Join(cr.WorkDir, "busybox")
-	bbSrc := "tools/bin/busybox"
-	bbFS := busyBoxFS
-	if err := extractFile(bbFS, bbSrc, busyBoxPath); err != nil {
-		// Try to extract from tools directory
-		bbSrc = "tools/busybox"
-		bbFS = toolsFS
-		if err := extractFile(toolsFS, bbSrc, busyBoxPath); err != nil {
-			return fmt.Errorf("failed to extract busybox: %w", err)
-		}
+	if err := extractFile(toolsFS, "tools/busybox", busyBoxPath); err != nil {
+		return fmt.Errorf("failed to extract busybox: %w", err)
 	}
-
 	if err := os.Chmod(busyBoxPath, 0755); err != nil {
 		return fmt.Errorf("failed to chmod busybox: %w", err)
 	}
 	cr.ToolPaths["busybox"] = busyBoxPath
-
-	// Compute and verify checksum
-	expectedHash, _ := computeEmbedHash(bbFS, bbSrc)
-	cr.ToolHashes["busybox"] = expectedHash
+	cr.ToolHashes["busybox"], _ = computeEmbedHash(toolsFS, "tools/busybox")
 	if err := cr.verifyTool("busybox"); err != nil {
 		return err
 	}

@@ -85,19 +85,6 @@ func loadStaticTLSConfig(tlsCfg *models.TLSConfig, log *zap.Logger) (*tls.Config
 		MinVersion:   tls.VersionTLS12,
 	}
 
-	if tlsCfg.ClientCA != "" {
-		caCert, err := os.ReadFile(tlsCfg.ClientCA)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read client CA: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse client CA certificate")
-		}
-		tc.ClientCAs = pool
-		tc.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-
 	log.Info("Loaded static TLS certificates",
 		zap.String("cert", tlsCfg.Cert),
 		zap.String("key", tlsCfg.Key))

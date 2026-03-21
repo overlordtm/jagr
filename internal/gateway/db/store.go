@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	_ "github.com/mattn/go-sqlite3"
-	
+
 	"github.com/overlordtm/jagr/internal/gateway/models"
 )
 
@@ -37,18 +37,9 @@ func NewStore(dbPath string, log *zap.Logger) (*Store, error) {
 
 func (s *Store) createSchema() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS exercises (
-		id          TEXT PRIMARY KEY,
-		name        TEXT NOT NULL,
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-		status      TEXT DEFAULT 'active'
-	);
-
 	CREATE TABLE IF NOT EXISTS agents (
 		id          TEXT PRIMARY KEY,
-		exercise_id TEXT NOT NULL REFERENCES exercises(id),
-		api_key     TEXT UNIQUE NOT NULL,
-		hostname    TEXT,
+		hostname    TEXT UNIQUE NOT NULL,
 		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -90,36 +81,83 @@ func (s *Store) createSchema() error {
 	return err
 }
 
-func (s *Store) CreateExercise(id, name string) (*models.Exercise, error) {
-	ex := &models.Exercise{
-		ID:        id,
-		Name:      name,
-		CreatedAt: time.Now(),
-		Status:    "active",
+// FindOrCreateAgentByHostname returns the agent for the given hostname,
+// creating one if it doesn't exist (auto-enrollment).
+func (s *Store) FindOrCreateAgentByHostname(hostname string) (*models.Agent, error) {
+	agent := &models.Agent{}
+	err := s.db.QueryRow(`
+		SELECT id, hostname, created_at FROM agents WHERE hostname = ?
+	`, hostname).Scan(&agent.ID, &agent.Hostname, &agent.CreatedAt)
+	if err == nil {
+		return agent, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
 	}
 
-	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO exercises (id, name, status) VALUES (?, ?, ?)`,
-		ex.ID, ex.Name, ex.Status,
-	)
-	return ex, err
-}
-
-func (s *Store) CreateAgent(exerciseID, apiKey, hostname string) (*models.Agent, error) {
+	// Auto-enroll
 	agentID := uuid.New().String()
-	agent := &models.Agent{
-		ID:         agentID,
-		ExerciseID: exerciseID,
-		APIKeyHash: apiKey,
-		Hostname:   hostname,
-		CreatedAt:  time.Now(),
+	agent = &models.Agent{
+		ID:        agentID,
+		Hostname:  hostname,
+		CreatedAt: time.Now(),
 	}
 
-	_, err := s.db.Exec(
-		`INSERT INTO agents (id, exercise_id, api_key, hostname) VALUES (?, ?, ?, ?)`,
-		agent.ID, agent.ExerciseID, agent.APIKeyHash, agent.Hostname,
+	_, err = s.db.Exec(
+		`INSERT INTO agents (id, hostname) VALUES (?, ?)`,
+		agent.ID, agent.Hostname,
 	)
 	return agent, err
+}
+
+func (s *Store) GetAgent(agentID string) (*models.Agent, error) {
+	agent := &models.Agent{}
+	err := s.db.QueryRow(`
+		SELECT id, hostname, created_at FROM agents WHERE id = ?
+	`, agentID).Scan(&agent.ID, &agent.Hostname, &agent.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return agent, nil
+}
+
+func (s *Store) GetAgents() ([]models.Agent, error) {
+	rows, err := s.db.Query(`
+		SELECT id, hostname, created_at FROM agents ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var agents []models.Agent
+	for rows.Next() {
+		var a models.Agent
+		err := rows.Scan(&a.ID, &a.Hostname, &a.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		agents = append(agents, a)
+	}
+	return agents, rows.Err()
+}
+
+func (s *Store) DeleteAgentByHostname(hostname string) error {
+	result, err := s.db.Exec(`DELETE FROM agents WHERE hostname = ?`, hostname)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) CreateSession(agentID string) (*models.Session, error) {
@@ -155,9 +193,63 @@ func (s *Store) GetSession(sessionID string) (*models.Session, error) {
 	return &sess, nil
 }
 
+func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
+	var sess models.Session
+	err := s.db.QueryRow(`
+		SELECT id, agent_id, created_at, updated_at, status FROM sessions
+		WHERE agent_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1
+	`, agentID).Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &sess, nil
+}
+
+func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
+	rows, err := s.db.Query(`
+		SELECT id, agent_id, created_at, updated_at, status FROM sessions WHERE agent_id = ?
+	`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []models.Session
+	for rows.Next() {
+		var s models.Session
+		err := rows.Scan(&s.ID, &s.AgentID, &s.CreatedAt, &s.UpdatedAt, &s.Status)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *Store) CloseSession(sessionID string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET status = 'closed' WHERE id = ?`, sessionID)
+	return err
+}
+
+func (s *Store) UpdateSessionUpdatedAt(sessionID string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessionID)
+	return err
+}
+
 func (s *Store) GetMessageCount(sessionID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) CountMessages(sessionID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM messages WHERE session_id = ?
+	`, sessionID).Scan(&count)
 	return count, err
 }
 
@@ -197,6 +289,38 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 	return messages, rows.Err()
 }
 
+func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog, error) {
+	query := `
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, latency_ms, created_at
+		FROM messages WHERE session_id = ? AND (tool_calls IS NOT NULL OR role = 'tool')
+		ORDER BY created_at ASC
+	`
+	rows, err := s.db.Query(query, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []models.MessageLog
+	for rows.Next() {
+		var m models.MessageLog
+		var toolCallsStr sql.NullString
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.LatencyMs, &m.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if toolCallsStr.Valid {
+			m.ToolCalls = toolCallsStr.String
+		}
+		messages = append(messages, m)
+	}
+	return messages, rows.Err()
+}
+
+func (s *Store) GetEventsForSession(sessionID string) ([]models.MessageLog, error) {
+	return s.GetSessionMessages(sessionID)
+}
+
 func (s *Store) LogAudit(agentID, eventType string, payload any) error {
 	payloadBytes, _ := json.Marshal(payload)
 
@@ -205,106 +329,6 @@ func (s *Store) LogAudit(agentID, eventType string, payload any) error {
 		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
 	`, agentID, eventType, string(payloadBytes))
 	return err
-}
-
-func (s *Store) UpdateSessionUpdatedAt(sessionID string) error {
-	_, err := s.db.Exec(`UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessionID)
-	return err
-}
-
-func (s *Store) Close() error {
-	return s.db.Close()
-}
-
-func (s *Store) FindAgentByAPIKey(apiKey string) (*models.Agent, error) {
-	agent := &models.Agent{}
-	err := s.db.QueryRow(`
-		SELECT id, exercise_id, api_key, hostname, created_at FROM agents WHERE api_key = ?
-	`, apiKey).Scan(&agent.ID, &agent.ExerciseID, &agent.APIKeyHash, &agent.Hostname, &agent.CreatedAt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return agent, nil
-}
-
-func (s *Store) UpdateAgentHostname(agentID, hostname string) error {
-	_, err := s.db.Exec(`UPDATE agents SET hostname = ? WHERE id = ?`, hostname, agentID)
-	return err
-}
-
-func (s *Store) CloseSession(sessionID string) error {
-	_, err := s.db.Exec(`UPDATE sessions SET status = 'closed' WHERE id = ?`, sessionID)
-	return err
-}
-
-func (s *Store) GetExercises(status string) ([]models.Exercise, error) {
-	query := `SELECT id, name, created_at, status FROM exercises`
-	if status != "" {
-		query += ` WHERE status = ?`
-	}
-	query += ` ORDER BY created_at DESC`
-
-	rows, err := s.db.Query(query, status)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var exercises []models.Exercise
-	for rows.Next() {
-		var ex models.Exercise
-		err := rows.Scan(&ex.ID, &ex.Name, &ex.CreatedAt, &ex.Status)
-		if err != nil {
-			return nil, err
-		}
-		exercises = append(exercises, ex)
-	}
-	return exercises, rows.Err()
-}
-
-func (s *Store) GetAgents(exerciseID string) ([]models.Agent, error) {
-	rows, err := s.db.Query(`
-		SELECT id, exercise_id, api_key, hostname, created_at FROM agents WHERE exercise_id = ?
-	`, exerciseID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var agents []models.Agent
-	for rows.Next() {
-		var a models.Agent
-		err := rows.Scan(&a.ID, &a.ExerciseID, &a.APIKeyHash, &a.Hostname, &a.CreatedAt)
-		if err != nil {
-			return nil, err
-		}
-		agents = append(agents, a)
-	}
-	return agents, rows.Err()
-}
-
-func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
-	rows, err := s.db.Query(`
-		SELECT id, agent_id, created_at, updated_at, status FROM sessions WHERE agent_id = ?
-	`, agentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var sessions []models.Session
-	for rows.Next() {
-		var s models.Session
-		err := rows.Scan(&s.ID, &s.AgentID, &s.CreatedAt, &s.UpdatedAt, &s.Status)
-		if err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, s)
-	}
-	return sessions, rows.Err()
 }
 
 func (s *Store) GetAuditLog(agentID string, start, end time.Time, eventType string) ([]models.AuditLog, error) {
@@ -345,86 +369,6 @@ func (s *Store) GetAuditLog(agentID string, start, end time.Time, eventType stri
 	return logs, rows.Err()
 }
 
-func (s *Store) GetAgent(agentID string) (*models.Agent, error) {
-	agent := &models.Agent{}
-	err := s.db.QueryRow(`
-		SELECT id, exercise_id, api_key, hostname, created_at FROM agents WHERE id = ?
-	`, agentID).Scan(&agent.ID, &agent.ExerciseID, &agent.APIKeyHash, &agent.Hostname, &agent.CreatedAt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return agent, nil
-}
-
-func (s *Store) CountMessages(sessionID string) (int, error) {
-	var count int
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM messages WHERE session_id = ?
-	`, sessionID).Scan(&count)
-	return count, err
-}
-
-func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog, error) {
-	query := `
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, latency_ms, created_at
-		FROM messages WHERE session_id = ? AND (tool_calls IS NOT NULL OR role = 'tool')
-		ORDER BY created_at ASC
-	`
-	rows, err := s.db.Query(query, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var messages []models.MessageLog
-	for rows.Next() {
-		var m models.MessageLog
-		var toolCallsStr sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.LatencyMs, &m.CreatedAt)
-		if err != nil {
-			return nil, err
-		}
-		if toolCallsStr.Valid {
-			m.ToolCalls = toolCallsStr.String
-		}
-		messages = append(messages, m)
-	}
-	return messages, rows.Err()
-}
-
-func (s *Store) GetEventsForSession(sessionID string) ([]models.MessageLog, error) {
-	return s.GetSessionMessages(sessionID)
-}
-
-func (s *Store) DeleteAgentByAPIKey(apiKey string) error {
-	result, err := s.db.Exec(`DELETE FROM agents WHERE api_key = ?`, apiKey)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
-	var sess models.Session
-	err := s.db.QueryRow(`
-		SELECT id, agent_id, created_at, updated_at, status FROM sessions 
-		WHERE agent_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1
-	`, agentID).Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return &sess, nil
+func (s *Store) Close() error {
+	return s.db.Close()
 }

@@ -42,31 +42,50 @@ func NewProvider(config *models.ProviderConfig, log *zap.Logger) (Provider, erro
 func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
 	modelAlias := req.Model
 	var upstreamModel string
-	
+	var extraBody map[string]any
+
 	for _, m := range p.config.Models {
 		if m.Alias == modelAlias {
 			upstreamModel = m.Upstream
+			extraBody = m.ExtraBody
 			break
 		}
 	}
-	
+
 	if upstreamModel == "" && len(p.config.Models) > 0 {
 		upstreamModel = p.config.Models[0].Upstream
+		extraBody = p.config.Models[0].ExtraBody
 	} else if upstreamModel == "" {
 		upstreamModel = modelAlias
 	}
-	
+
 	req.Model = upstreamModel
-	
+
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
+
+	// Merge extra_body params into the request JSON
+	if len(extraBody) > 0 {
+		var reqMap map[string]any
+		if err := json.Unmarshal(reqBytes, &reqMap); err != nil {
+			return nil, err
+		}
+		for k, v := range extraBody {
+			reqMap[k] = v
+		}
+		reqBytes, err = json.Marshal(reqMap)
+		if err != nil {
+			return nil, err
+		}
+	}
 	
-	p.log.Debug("Forwarding request to provider", 
+	p.log.Info("Forwarding request to provider",
 		zap.String("model", req.Model),
 		zap.Int("messages", len(req.Messages)),
-		zap.String("base_url", p.baseURL))
+		zap.String("base_url", p.baseURL),
+		zap.String("request_body", string(reqBytes)))
 	
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewBuffer(reqBytes))
 	if err != nil {
@@ -78,7 +97,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -91,7 +110,10 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 	}
 	
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("provider error: status %d", resp.StatusCode)
+		p.log.Error("Provider returned error",
+			zap.Int("status", resp.StatusCode),
+			zap.String("body", string(body)))
+		return nil, fmt.Errorf("provider error: status %d: %s", resp.StatusCode, string(body))
 	}
 	
 	var reply models.ChatCompletionResponse

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,16 +16,16 @@ import (
 
 // Agent represents the JAGR agent instance
 type Agent struct {
-	gatewayURL     string
-	apiKey         string
-	mode           string
-	maxIter        int
-	maxTokens      int
-	model          string
-	objective      string
-	outputDir      string
-	logger         *zap.Logger
-	cleanRoom      *CleanRoom
+	gatewayURL string
+	apiKey     string
+	mode       string
+	maxIter    int
+	model      string
+	objective  string
+	outputDir  string
+	logger     *zap.Logger
+	cleanRoom  *CleanRoom
+	httpClient *http.Client
 
 	conversation   []Message
 	iterations     int
@@ -58,21 +59,26 @@ type FindingSummary struct {
 	Info     int `json:"info"`
 }
 
-func NewAgent(gatewayURL, apiKey, mode string, maxIter, maxTokens int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom) (*Agent, error) {
-	if maxTokens == 0 {
-		maxTokens = 500000
+func NewAgent(gatewayURL, apiKey, mode string, maxIter int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom, tlsSkipVerify bool) (*Agent, error) {
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	if tlsSkipVerify {
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		logger.Warn("TLS certificate verification disabled")
 	}
+
 	return &Agent{
 		gatewayURL: gatewayURL,
 		apiKey:     apiKey,
 		mode:       mode,
 		maxIter:    maxIter,
-		maxTokens:  maxTokens,
 		model:      model,
 		objective:  objective,
 		outputDir:  outputDir,
 		logger:     logger,
 		cleanRoom:  cleanRoom,
+		httpClient: httpClient,
 		startTime:  time.Now(),
 	}, nil
 }
@@ -89,15 +95,6 @@ func (a *Agent) Run() error {
 	a.conversation = append(a.conversation, Message{Role: "system", Content: systemPrompt})
 
 	for a.iterations < a.maxIter {
-		// Token budget guard
-		totalTokens := a.totalTokensIn + a.totalTokensOut
-		if totalTokens > a.maxTokens {
-			a.logger.Info("Token budget exceeded, concluding",
-				zap.Int("total_tokens", totalTokens),
-				zap.Int("max_tokens", a.maxTokens))
-			return a.conclude("Token budget exceeded")
-		}
-
 		toolCalls, err := a.think()
 		if err != nil {
 			return fmt.Errorf("thinking failed: %w", err)
@@ -170,14 +167,108 @@ func (a *Agent) hostname() string {
 }
 
 func (a *Agent) buildSystemPrompt() string {
-	return `You are JAGR (Jagr Autonomous Guardian Agent), an autonomous AI security auditor.
-Your mission is to investigate and audit the target system for security vulnerabilities.
+	return `You are Jagr, an autonomous security engineer conducting a defensive security audit
+of a Linux system in a cybersecurity exercise environment. You are running as root on
+the target host. Your goal is to identify security issues, misconfigurations,
+indicators of compromise, backdoors, and persistence mechanisms.
+
+## Your Environment
+
+You operate inside a "Clean Room" — a trusted execution environment extracted to a
+RAM-backed directory. All commands you execute run through trusted BusyBox binaries
+with a sanitized environment. The host system may be compromised, so you must never
+trust host binaries outside the Clean Room.
+
+You communicate with a gateway server that provides your intelligence. Exercise
+documentation (network maps, system manuals, baseline configs) is available via the
+query_knowledge_base tool.
+
+## Investigation Methodology
+
+Follow this structured approach. You may deviate when findings warrant deeper
+investigation, but always return to the methodology.
+
+### Phase 1: Situational Awareness (already completed)
+Host context has been provided to you. Review it before proceeding.
+
+### Phase 2: User & Access Audit
+- Enumerate all user accounts (/etc/passwd), focusing on UID 0 accounts, users with
+  shells, and recently created accounts
+- Check /etc/shadow for accounts without passwords or with suspicious hashes
+- Review /etc/sudoers and /etc/sudoers.d/ for overly permissive rules
+- Check SSH authorized_keys for all users, especially root
+- Review /etc/group for unexpected group memberships
+
+### Phase 3: Persistence Mechanisms
+- Check all cron locations: /etc/crontab, /etc/cron.d/, /etc/cron.{hourly,daily,weekly,monthly},
+  and per-user crontabs (crontab -l for each user)
+- Review systemd units: look for unusual .service, .timer files in /etc/systemd/system/
+  and /lib/systemd/system/
+- Check init scripts in /etc/init.d/
+- Examine /etc/rc.local and /etc/profile.d/
+- Review shell profiles: /etc/bash.bashrc, ~/.bashrc, ~/.profile, ~/.bash_profile
+  for all users with shells
+- Check /etc/ld.so.preload for LD_PRELOAD persistence
+
+### Phase 4: Process & Network Analysis
+- Examine running processes, look for suspicious parents, unusual binaries,
+  processes running from /tmp or /dev/shm
+- Start pspy for at least 120 seconds to catch scheduled tasks
+- Review listening ports and active connections
+- Look for unexpected outbound connections, especially to non-standard ports
+- Check iptables/nftables rules for unusual NAT or forwarding rules
+
+### Phase 5: Filesystem Analysis
+- Search for recently modified files: find / -mtime -7 -type f (focus on
+  /etc, /usr, /var, /root, /home)
+- Look for hidden files and directories in unusual locations (/var, /tmp, /dev/shm, /opt)
+- Check for SUID/SGID binaries and compare against expected set
+- Look for world-writable files in sensitive locations
+- Check /tmp, /var/tmp, /dev/shm for suspicious files
+
+### Phase 6: Log Analysis
+- Review auth logs (/var/log/auth.log or /var/log/secure) for brute force,
+  successful logins from unexpected sources, privilege escalation
+- Check syslog/journal for unusual service starts, crashes, or errors
+- Look for log tampering: gaps in timestamps, truncated files, cleared logs
+
+### Phase 7: Advanced Checks (if warranted by earlier findings)
+- Run LinPEAS for comprehensive privilege escalation checks
+- Check for kernel modules (lsmod), compare against expected modules
+- Review /etc/hosts for DNS hijacking
+- Check for container escapes if running in a containerized environment
+- Investigate any anomalies found in earlier phases
 
 ## Available Tools
 ` + a.formatToolsForPrompt() + `
 
-Perform a comprehensive security audit of this host.
-Begin your investigation now.`
+## Rules
+
+1. NEVER run LinPEAS first. Do manual investigation first (Phases 2-6). LinPEAS
+   is a supplement in Phase 7, not a replacement for manual analysis.
+2. Submit findings as you discover them via submit_finding. Do not accumulate
+   findings and submit at the end.
+3. For each finding, provide: what you found, why it is a security issue, the
+   evidence (exact file content or command output), and MITRE ATT&CK technique ID
+   if applicable.
+4. Classify severity accurately:
+   - critical: active backdoor, reverse shell, rootkit, credential theft
+   - high: persistence mechanism, privilege escalation vector, unauthorized access
+   - medium: misconfiguration that could enable escalation, weak permissions
+   - low: informational security hardening recommendations
+   - info: observations that provide context but are not issues
+5. If you find something suspicious, investigate deeper before concluding. Follow
+   the trail: a suspicious cron job might point to a dropped binary, which might
+   point to a C2 channel.
+6. When output is large, use head/tail/grep to focus on relevant sections rather
+   than reading everything.
+7. Do not modify the target system. You are investigating, not remediating.
+8. Use query_knowledge_base when you encounter unfamiliar services, need to verify
+   expected configurations, or want to understand the network topology.
+9. Set your confidence level honestly. If you are uncertain whether something is
+   malicious or legitimate, say so and explain your reasoning.
+10. When you have completed all phases and followed up on all leads, call conclude
+    with a summary of your findings.`
 }
 
 func (a *Agent) formatToolsForPrompt() string {
@@ -223,9 +314,9 @@ func (a *Agent) think() ([]ToolCall, error) {
 	req, _ := http.NewRequest("POST", a.gatewayURL+"/v1/chat/completions", strings.NewReader(string(reqBytes)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
 
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("gateway request failed: %w", err)
 	}
@@ -583,8 +674,8 @@ func (a *Agent) execGetNetworkInfo(tc ToolCall, args map[string]any) (ToolResult
 	content := strings.Join(results, "\n")
 
 	return ToolResult{
-		ToolID: tc.ID,
-		Name:   tc.Function.Name,
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
 		Content: content,
 	}, nil
 }
@@ -664,18 +755,18 @@ func (a *Agent) conclude(summary string) error {
 }
 
 func (a *Agent) generateReports(summary string) error {
- report := Report{
+	report := Report{
 		Metadata: ReportMetadata{
-			Project:      "jagr",
-			Version:      "2.0",
-			AgentID:      fmt.Sprintf("agent-%s-%s", a.hostname(), a.startTime.Format("20060102")),
-			Hostname:     a.hostname(),
-			StartTime:    a.startTime,
-			EndTime:      time.Now(),
-			Mode:         a.mode,
-			Model:        a.model,
-			Iterations:   a.iterations,
-		TotalTokens:  a.totalTokensIn + a.totalTokensOut,
+			Project:     "jagr",
+			Version:     "2.0",
+			AgentID:     fmt.Sprintf("agent-%s-%s", a.hostname(), a.startTime.Format("20060102")),
+			Hostname:    a.hostname(),
+			StartTime:   a.startTime,
+			EndTime:     time.Now(),
+			Mode:        a.mode,
+			Model:       a.model,
+			Iterations:  a.iterations,
+			TotalTokens: a.totalTokensIn + a.totalTokensOut,
 		},
 		Findings: a.findings,
 		Summary:  a.buildSummary(),
@@ -767,9 +858,9 @@ func (a *Agent) logEvent(eventType string, data map[string]any) error {
 }
 
 type Event struct {
-	Timestamp time.Time         `json:"ts"`
-	Type      string            `json:"type"`
-	Data      map[string]any    `json:"data"`
+	Timestamp time.Time      `json:"ts"`
+	Type      string         `json:"type"`
+	Data      map[string]any `json:"data"`
 }
 
 type Report struct {
@@ -779,16 +870,16 @@ type Report struct {
 }
 
 type ReportMetadata struct {
-	Project      string    `json:"project"`
-	Version      string    `json:"version"`
-	AgentID      string    `json:"agent_id"`
-	Hostname     string    `json:"hostname"`
-	StartTime    time.Time `json:"start_time"`
-	EndTime      time.Time `json:"end_time"`
-	Mode         string    `json:"mode"`
-	Model        string    `json:"model"`
-	Iterations   int       `json:"iterations"`
-	TotalTokens  int       `json:"total_tokens,omitempty"`
+	Project     string    `json:"project"`
+	Version     string    `json:"version"`
+	AgentID     string    `json:"agent_id"`
+	Hostname    string    `json:"hostname"`
+	StartTime   time.Time `json:"start_time"`
+	EndTime     time.Time `json:"end_time"`
+	Mode        string    `json:"mode"`
+	Model       string    `json:"model"`
+	Iterations  int       `json:"iterations"`
+	TotalTokens int       `json:"total_tokens,omitempty"`
 }
 
 func saveJSON(path string, data any) error {
