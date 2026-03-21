@@ -4,6 +4,19 @@ server:
     cert: /etc/jagr/server.crt
     key: /etc/jagr/server.key
     client_ca: /etc/jagr/ca.crt
+    # ACME (Let's Encrypt) automatic certificate management
+    # When enabled, certificates are obtained and renewed automatically.
+    # acme:
+    #   enabled: true
+    #   email: admin@example.com
+    #   domains:
+    #     - jagr.example.com
+    #   cache_dir: /var/lib/jagr/acme
+    #   ca_url: ""  # leave empty for Let's Encrypt production
+    #
+    # If ACME is not enabled and cert/key files do not exist at the
+    # specified paths, a self-signed certificate will be generated
+    # automatically.
 
 database:
   path: /var/lib/jagr/jagr.db

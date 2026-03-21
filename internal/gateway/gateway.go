@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -64,14 +63,21 @@ func (g *Gateway) Start() error {
 	g.setupRoutes(router)
 
 	addr := g.config.Server.Listen
-	if g.config.Server.TLS.Cert != "" && g.config.Server.TLS.Key != "" {
+
+	tlsConfig, err := buildTLSConfig(&g.config.Server, g.log)
+	if err != nil {
+		return fmt.Errorf("failed to configure TLS: %w", err)
+	}
+
+	if tlsConfig != nil {
 		server := &http.Server{
 			Addr:      addr,
 			Handler:   router,
-			TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			TLSConfig: tlsConfig,
 		}
 		g.log.Info("Starting gateway with TLS", zap.String("addr", addr))
-		return server.ListenAndServeTLS(g.config.Server.TLS.Cert, g.config.Server.TLS.Key)
+		// Certificates are already in TLSConfig, so pass empty strings
+		return server.ListenAndServeTLS("", "")
 	}
 
 	g.log.Info("Starting gateway without TLS", zap.String("addr", addr))

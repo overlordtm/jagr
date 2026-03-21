@@ -17,9 +17,18 @@ type ServerConfig struct {
 }
 
 type TLSConfig struct {
-	Cert   string `yaml:"cert"`
-	Key    string `yaml:"key"`
-	ClientCA string `yaml:"client_ca,omitempty"`
+	Cert     string     `yaml:"cert"`
+	Key      string     `yaml:"key"`
+	ClientCA string     `yaml:"client_ca,omitempty"`
+	ACME     ACMEConfig `yaml:"acme,omitempty"`
+}
+
+type ACMEConfig struct {
+	Enabled  bool     `yaml:"enabled"`
+	Email    string   `yaml:"email"`
+	Domains  []string `yaml:"domains"`
+	CacheDir string   `yaml:"cache_dir"`
+	CAUrl    string   `yaml:"ca_url,omitempty"`
 }
 
 type DatabaseConfig struct {

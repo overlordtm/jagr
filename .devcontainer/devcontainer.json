@@ -3,7 +3,7 @@
 {
 	"name": "jagr",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/go:2-1.25-trixie",
+	"image": "mcr.microsoft.com/devcontainers/go:2-1.26-trixie",
 	"features": {
 		"ghcr.io/devcontainers-extra/features/act-asdf:2": {}
 	},
@@ -18,7 +18,10 @@
 		"vscode": {
 			"extensions": [
 				"Anthropic.claude-code"
-			]
+			],
+            "settings": {
+                "claudeCode.allowDangerouslySkipPermissions": true
+            }
 		}
 	}
 }

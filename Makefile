@@ -1,4 +1,4 @@
-.PHONY: all build build-agent build-gateway test clean tools fetch-tools
+.PHONY: all build build-agent build-gateway test clean tools fetch-tools patch-busybox
 
 AGENT_BIN   := dist/jagr-agent
 GATEWAY_BIN := dist/jagr-gateway
@@ -30,6 +30,17 @@ build-gateway:
 # --- Fetch Tools (downloaded at build time, not committed to repo) ---
 
 fetch-tools: fetch-busybox fetch-linpeas fetch-pspy
+
+patch-busybox:
+	@cd external/busybox && \
+	for p in ../busybox-patches/*.patch; do \
+		if git apply --check "$$p" 2>/dev/null; then \
+			echo "Applying $$(basename $$p)..."; \
+			git apply "$$p"; \
+		else \
+			echo "$$(basename $$p) already applied, skipping."; \
+		fi; \
+	done
 
 fetch-busybox:
 	@mkdir -p $(TOOLS_BIN)

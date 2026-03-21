@@ -1,119 +1,132 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"github.com/overlordtm/jagr/internal/agent"
 )
 
 func main() {
-	agentCmd := flag.NewFlagSet("agent", flag.ExitOnError)
+	var (
+		gatewayURL    string
+		apiKey        string
+		mode          string
+		maxIterations int
+		maxTokens     int
+		model         string
+		objective     string
+		outputDir     string
+		verbose       bool
+		hostname      string
+	)
 
-	gatewayURL := agentCmd.String("gateway-url", "", "Gateway server URL (required)")
-	apiKey := agentCmd.String("api-key", "", "API key for gateway auth (or JAGR_API_KEY env)")
-	mode := agentCmd.String("mode", "interactive", "Execution mode: batch | interactive")
-	maxIterations := agentCmd.Int("max-iterations", 50, "Maximum ReAct loop iterations")
-	maxTokens := agentCmd.Int("max-tokens", 500000, "Maximum total tokens consumed before concluding")
-	model := agentCmd.String("model", "default", "Model alias to request from gateway")
-	objective := agentCmd.String("objective", "", "Custom objective prompt")
-	outputDir := agentCmd.String("output-dir", "./jagr-output", "Directory for reports")
-	verbose := agentCmd.Bool("verbose", false, "Verbose local logging")
-	hostname := agentCmd.String("hostname", "", "Override hostname detection")
+	rootCmd := &cobra.Command{
+		Use:   "jagr-agent",
+		Short: "JAGR security assessment agent",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Build logger
+			level := zap.InfoLevel
+			if verbose {
+				level = zap.DebugLevel
+			}
 
-	if err := agentCmd.Parse(os.Args[1:]); err != nil {
-		fmt.Printf("Error parsing flags: %v\n", err)
-		os.Exit(1)
+			config := zap.NewProductionConfig()
+			config.Level.SetLevel(level)
+			logger, err := config.Build()
+			if err != nil {
+				return fmt.Errorf("failed to build logger: %w", err)
+			}
+			defer logger.Sync()
+
+			// Validate required flags
+			if gatewayURL == "" {
+				return fmt.Errorf("--gateway-url is required (or set JAGR_GATEWAY_URL)")
+			}
+			if apiKey == "" {
+				return fmt.Errorf("--api-key is required (or set JAGR_API_KEY)")
+			}
+
+			// Get hostname
+			if hostname == "" {
+				if h, err := os.Hostname(); err == nil {
+					hostname = h
+				} else {
+					hostname = "unknown"
+				}
+			}
+
+			logger.Info("Agent starting",
+				zap.String("gateway_url", gatewayURL),
+				zap.String("mode", mode),
+				zap.String("model", model),
+				zap.String("hostname", hostname))
+
+			// Create output directory
+			if err := os.MkdirAll(outputDir, 0700); err != nil {
+				return fmt.Errorf("failed to create output directory: %w", err)
+			}
+
+			// Initialize clean room
+			cleanRoom, err := agent.NewCleanRoom()
+			if err != nil {
+				return fmt.Errorf("failed to create clean room: %w", err)
+			}
+			defer cleanRoom.Cleanup()
+
+			logger.Info("Clean Room initialized", zap.String("work_dir", cleanRoom.WorkDir))
+
+			// Create agent instance
+			ag, err := agent.NewAgent(
+				gatewayURL,
+				apiKey,
+				mode,
+				maxIterations,
+				maxTokens,
+				model,
+				objective,
+				outputDir,
+				logger,
+				cleanRoom,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create agent: %w", err)
+			}
+
+			return ag.Run()
+		},
 	}
 
-	// Log level
-	level := zap.InfoLevel
-	if *verbose {
-		level = zap.DebugLevel
-	}
+	flags := rootCmd.Flags()
+	flags.StringVar(&gatewayURL, "gateway-url", "", "Gateway server URL (required)")
+	flags.StringVar(&apiKey, "api-key", "", "API key for gateway auth")
+	flags.StringVar(&mode, "mode", "interactive", "Execution mode: batch | interactive")
+	flags.IntVar(&maxIterations, "max-iterations", 50, "Maximum ReAct loop iterations")
+	flags.IntVar(&maxTokens, "max-tokens", 500000, "Maximum total tokens consumed before concluding")
+	flags.StringVar(&model, "model", "default", "Model alias to request from gateway")
+	flags.StringVar(&objective, "objective", "", "Custom objective prompt")
+	flags.StringVar(&outputDir, "output-dir", "./jagr-output", "Directory for reports")
+	flags.BoolVar(&verbose, "verbose", false, "Verbose local logging")
+	flags.StringVar(&hostname, "hostname", "", "Override hostname detection")
 
-	// Build logger
-	config := zap.NewProductionConfig()
-	config.Level.SetLevel(level)
-	logger, err := config.Build()
-	if err != nil {
-		fmt.Printf("Failed to build logger: %v\n", err)
-		os.Exit(1)
-	}
-	defer logger.Sync()
-
-	// Get API key from env if not provided
-	if *apiKey == "" {
-		*apiKey = os.Getenv("JAGR_API_KEY")
-	}
-
-	// Validate required flags
-	if *gatewayURL == "" {
-		fmt.Println("Error: --gateway-url is required")
-		agentCmd.PrintDefaults()
-		os.Exit(1)
-	}
-
-	if *apiKey == "" {
-		fmt.Println("Error: --api-key is required or JAGR_API_KEY environment variable must be set")
-		os.Exit(1)
-	}
-
-	// Get hostname
-	if *hostname == "" {
-		if h, err := os.Hostname(); err == nil {
-			*hostname = h
-		} else {
-			*hostname = "unknown"
+	// Bind env vars
+	rootCmd.PreRun = func(cmd *cobra.Command, args []string) {
+		if !cmd.Flags().Changed("gateway-url") {
+			if v := os.Getenv("JAGR_GATEWAY_URL"); v != "" {
+				gatewayURL = v
+			}
+		}
+		if !cmd.Flags().Changed("api-key") {
+			if v := os.Getenv("JAGR_API_KEY"); v != "" {
+				apiKey = v
+			}
 		}
 	}
 
-	logger.Info("Agent starting",
-		zap.String("gateway_url", *gatewayURL),
-		zap.String("mode", *mode),
-		zap.String("model", *model),
-		zap.String("hostname", *hostname))
-
-	// Create output directory
-	if err := os.MkdirAll(*outputDir, 0700); err != nil {
-		logger.Error("Failed to create output directory", zap.Error(err))
-		os.Exit(1)
-	}
-
-	// Initialize clean room
-	cleanRoom, err := agent.NewCleanRoom()
-	if err != nil {
-		logger.Error("Failed to create clean room", zap.Error(err))
-		os.Exit(1)
-	}
-	defer cleanRoom.Cleanup()
-
-	logger.Info("Clean Room initialized", zap.String("work_dir", cleanRoom.WorkDir))
-
-	// Create agent instance
-	ag, err := agent.NewAgent(
-		*gatewayURL,
-		*apiKey,
-		*mode,
-		*maxIterations,
-		*maxTokens,
-		*model,
-		*objective,
-		*outputDir,
-		logger,
-		cleanRoom,
-	)
-	if err != nil {
-		logger.Error("Failed to create agent", zap.Error(err))
-		os.Exit(1)
-	}
-
-	// Run the agent
-	if err := ag.Run(); err != nil {
-		logger.Error("Agent execution failed", zap.Error(err))
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }

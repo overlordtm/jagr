@@ -1,10 +1,10 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
@@ -13,46 +13,53 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "gateway.yaml", "Path to gateway config file")
-	verbose := flag.Bool("verbose", false, "Verbose logging")
+	var (
+		configPath string
+		verbose    bool
+	)
 
-	flag.Parse()
+	rootCmd := &cobra.Command{
+		Use:   "jagr-gateway",
+		Short: "JAGR gateway server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Load config
+			config, err := loadConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
 
-	// Load config
-	config, err := loadConfig(*configPath)
-	if err != nil {
-		fmt.Printf("Failed to load config: %v\n", err)
-		os.Exit(1)
+			// Build logger
+			level := zap.InfoLevel
+			if verbose {
+				level = zap.DebugLevel
+			}
+
+			zapConfig := zap.NewProductionConfig()
+			zapConfig.Level.SetLevel(level)
+			logger, err := zapConfig.Build()
+			if err != nil {
+				return fmt.Errorf("failed to build logger: %w", err)
+			}
+			defer logger.Sync()
+
+			logger.Info("Gateway starting",
+				zap.String("config", configPath),
+				zap.String("listen", config.Server.Listen))
+
+			// Create and start gateway
+			gw, err := gateway.NewGateway(config, logger)
+			if err != nil {
+				return fmt.Errorf("failed to create gateway: %w", err)
+			}
+
+			return gw.Start()
+		},
 	}
 
-	// Build logger
-	level := zap.InfoLevel
-	if *verbose {
-		level = zap.DebugLevel
-	}
+	rootCmd.Flags().StringVar(&configPath, "config", "gateway.yaml", "Path to gateway config file")
+	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
 
-	zapConfig := zap.NewProductionConfig()
-	zapConfig.Level.SetLevel(level)
-	logger, err := zapConfig.Build()
-	if err != nil {
-		fmt.Printf("Failed to build logger: %v\n", err)
-		os.Exit(1)
-	}
-	defer logger.Sync()
-
-	logger.Info("Gateway starting",
-		zap.String("config", *configPath),
-		zap.String("listen", config.Server.Listen))
-
-	// Create and start gateway
-	gw, err := gateway.NewGateway(config, logger)
-	if err != nil {
-		logger.Error("Failed to create gateway", zap.Error(err))
-		os.Exit(1)
-	}
-
-	if err := gw.Start(); err != nil {
-		logger.Error("Gateway failed", zap.Error(err))
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
