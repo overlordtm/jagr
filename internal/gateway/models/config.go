@@ -10,6 +10,19 @@ type Config struct {
 	DefaultProvider string     `yaml:"default_provider"`
 	DefaultModel    string     `yaml:"default_model"`
 	Logging   LoggingConfig  `yaml:"logging"`
+	Dashboard DashboardConfig `yaml:"dashboard"`
+	Timeouts  TimeoutConfig  `yaml:"timeouts"`
+}
+
+type DashboardConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Listen  string            `yaml:"listen"`
+	Users   []DashboardUser   `yaml:"users,omitempty"`
+}
+
+type DashboardUser struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 type ServerConfig struct {
@@ -41,9 +54,13 @@ type RateLimitConfig struct {
 }
 
 type SessionConfig struct {
-	TimeoutMinutes      int    `yaml:"timeout_minutes"`
-	HistoryMode         string `yaml:"history_mode"`
-	MaxTokensPerSession int    `yaml:"max_tokens_per_session"`
+	TimeoutMinutes      int `yaml:"timeout_minutes"`
+	MaxTokensPerSession int `yaml:"max_tokens_per_session"`
+}
+
+type TimeoutConfig struct {
+	ProviderTimeoutSeconds      int `yaml:"provider_timeout_seconds"`
+	PricingFetchTimeoutSeconds  int `yaml:"pricing_fetch_timeout_seconds"`
 }
 
 type ProviderConfig struct {

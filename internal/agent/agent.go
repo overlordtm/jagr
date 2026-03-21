@@ -16,24 +16,26 @@ import (
 
 // Agent represents the JAGR agent instance
 type Agent struct {
-	gatewayURL string
-	apiKey     string
-	mode       string
-	maxIter    int
-	model      string
-	objective  string
-	outputDir  string
-	logger     *zap.Logger
-	cleanRoom  *CleanRoom
-	httpClient *http.Client
+	gatewayURL      string
+	apiKey          string
+	mode            string
+	maxIter         int
+	maxToolFailures int
+	model           string
+	objective       string
+	outputDir       string
+	logger          *zap.Logger
+	cleanRoom       *CleanRoom
+	httpClient      *http.Client
 
-	conversation   []Message
-	iterations     int
-	totalTokensIn  int
-	totalTokensOut int
-	findings       []Finding
-	startTime      time.Time
-	concluded      bool
+	conversation     []Message
+	iterations       int
+	totalTokensIn    int
+	totalTokensOut   int
+	findings         []Finding
+	startTime        time.Time
+	concluded        bool
+	toolFailureCounts map[string]int
 }
 
 type Message struct {
@@ -59,8 +61,14 @@ type FindingSummary struct {
 	Info     int `json:"info"`
 }
 
-func NewAgent(gatewayURL, apiKey, mode string, maxIter int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom, tlsSkipVerify bool) (*Agent, error) {
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+// DefaultHTTPTimeout is the default timeout for HTTP requests to the gateway.
+const DefaultHTTPTimeout = 60 * time.Second
+
+func NewAgent(gatewayURL, apiKey, mode string, maxIter, maxToolFailures int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom, tlsSkipVerify bool, httpTimeout time.Duration) (*Agent, error) {
+	if httpTimeout == 0 {
+		httpTimeout = DefaultHTTPTimeout
+	}
+	httpClient := &http.Client{Timeout: httpTimeout}
 	if tlsSkipVerify {
 		httpClient.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -69,17 +77,19 @@ func NewAgent(gatewayURL, apiKey, mode string, maxIter int, model, objective, ou
 	}
 
 	return &Agent{
-		gatewayURL: gatewayURL,
-		apiKey:     apiKey,
-		mode:       mode,
-		maxIter:    maxIter,
-		model:      model,
-		objective:  objective,
-		outputDir:  outputDir,
-		logger:     logger,
-		cleanRoom:  cleanRoom,
-		httpClient: httpClient,
-		startTime:  time.Now(),
+		gatewayURL:        gatewayURL,
+		apiKey:            apiKey,
+		mode:              mode,
+		maxIter:           maxIter,
+		maxToolFailures:   maxToolFailures,
+		model:             model,
+		objective:         objective,
+		outputDir:         outputDir,
+		logger:            logger,
+		cleanRoom:         cleanRoom,
+		httpClient:        httpClient,
+		startTime:         time.Now(),
+		toolFailureCounts: make(map[string]int),
 	}, nil
 }
 
@@ -91,10 +101,26 @@ func (a *Agent) Run() error {
 		a.logger.Error("Failed to log init event", zap.Error(err))
 	}
 
+	// Start heartbeat goroutine — sends a heartbeat every 10s so the gateway
+	// knows this session is still alive.
+	heartbeatDone := make(chan struct{})
+	go a.heartbeatLoop(heartbeatDone)
+	defer close(heartbeatDone)
+	// Close the session on the gateway when we exit
+	defer a.closeSession()
+
 	systemPrompt := a.buildSystemPrompt()
 	a.conversation = append(a.conversation, Message{Role: "system", Content: systemPrompt})
 
+	hostContext := a.collectHostContext()
+	a.conversation = append(a.conversation, Message{
+		Role:    "user",
+		Content: fmt.Sprintf("## Target Host Context\n\n%s\n\nBegin your investigation following the methodology in your instructions. Start with Phase 2: User & Access Audit.", hostContext),
+	})
+
 	for a.iterations < a.maxIter {
+		a.logger.Info("Thinking", zap.Int("iteration", a.iterations+1), zap.Int("max", a.maxIter))
+
 		toolCalls, err := a.think()
 		if err != nil {
 			return fmt.Errorf("thinking failed: %w", err)
@@ -102,6 +128,10 @@ func (a *Agent) Run() error {
 
 		if a.concluded {
 			return nil
+		}
+
+		for _, tc := range toolCalls {
+			a.logger.Info("Tool call", zap.String("tool", tc.Function.Name))
 		}
 
 		// Interactive mode: present proposed actions and wait for approval
@@ -130,6 +160,57 @@ func (a *Agent) Run() error {
 
 	a.logger.Info("Max iterations reached, concluding")
 	return a.conclude("Maximum iterations reached")
+}
+
+// heartbeatLoop sends periodic heartbeats to the gateway every 10 seconds.
+// It stops when the done channel is closed.
+func (a *Agent) heartbeatLoop(done <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			a.sendHeartbeat()
+		}
+	}
+}
+
+func (a *Agent) sendHeartbeat() {
+	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/heartbeat", nil)
+	if err != nil {
+		a.logger.Debug("Failed to create heartbeat request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Debug("Heartbeat failed", zap.Error(err))
+		return
+	}
+	resp.Body.Close()
+}
+
+func (a *Agent) closeSession() {
+	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/sessions/close", nil)
+	if err != nil {
+		a.logger.Error("Failed to create close session request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("Failed to close session", zap.Error(err))
+		return
+	}
+	resp.Body.Close()
+	a.logger.Info("Session closed on gateway")
 }
 
 // promptOperator presents the proposed tool calls to the operator and waits for approval.
@@ -164,6 +245,51 @@ func (a *Agent) hostname() string {
 		return h
 	}
 	return "unknown"
+}
+
+func (a *Agent) collectHostContext() string {
+	var sections []string
+
+	// Hostname & kernel
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("uname", []string{"-a"}); err == nil && out != "" {
+		sections = append(sections, "### Kernel\n"+strings.TrimSpace(out))
+	}
+
+	// Distro info
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("cat", []string{"/etc/os-release"}); err == nil && out != "" {
+		sections = append(sections, "### Distribution\n"+strings.TrimSpace(out))
+	}
+
+	// Uptime
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("uptime", nil); err == nil && out != "" {
+		sections = append(sections, "### Uptime\n"+strings.TrimSpace(out))
+	}
+
+	// Network interfaces & IPs
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("ip", []string{"a"}); err == nil && out != "" {
+		sections = append(sections, "### Network Interfaces\n"+strings.TrimSpace(out))
+	}
+
+	// Routes
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("ip", []string{"r"}); err == nil && out != "" {
+		sections = append(sections, "### Routes\n"+strings.TrimSpace(out))
+	}
+
+	// Listening ports
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("ss", []string{"-tuln"}); err == nil && out != "" {
+		sections = append(sections, "### Listening Ports\n"+strings.TrimSpace(out))
+	}
+
+	// Logged in users
+	if out, _, _, err := a.cleanRoom.ExecuteTrusted("who", nil); err == nil && out != "" {
+		sections = append(sections, "### Logged In Users\n"+strings.TrimSpace(out))
+	}
+
+	if len(sections) == 0 {
+		return "Host context collection failed — proceed with manual discovery."
+	}
+
+	return strings.Join(sections, "\n\n")
 }
 
 func (a *Agent) buildSystemPrompt() string {
@@ -238,6 +364,136 @@ Host context has been provided to you. Review it before proceeding.
 - Review /etc/hosts for DNS hijacking
 - Check for container escapes if running in a containerized environment
 - Investigate any anomalies found in earlier phases
+
+### Comprehensive Enumeration Checklist
+
+Use this checklist throughout your investigation to ensure thorough coverage.
+
+#### System Information
+- Get OS information
+- Check the PATH — any writable folder?
+- Check env variables — any sensitive detail?
+- Search for kernel exploits using scripts (DirtyCow?)
+- Check if the sudo version is vulnerable
+- Dmesg signature verification failed
+- More system enum (date, system stats, cpu info, printers)
+- Enumerate more defenses
+
+#### Drives
+- List mounted drives
+- Any unmounted drive?
+- Any creds in fstab?
+
+#### Installed Software
+- Check for useful software installed
+- Check for vulnerable software installed
+
+#### Processes
+- Is any unknown software running?
+- Is any software running with more privileges than it should have?
+- Search for exploits of running processes (especially the version running)
+- Can you modify the binary of any running process?
+- Monitor processes and check if any interesting process is running frequently
+- Can you read some interesting process memory (where passwords could be saved)?
+
+#### Scheduled/Cron Jobs
+- Is the PATH being modified by some cron and you can write in it?
+- Any wildcard in a cron job?
+- Some modifiable script is being executed or is inside modifiable folder?
+- Have you detected that some script could be or is being executed very frequently?
+  (every 1, 2 or 5 minutes)
+
+#### Services
+- Any writable .service file?
+- Any writable binary executed by a service?
+- Any writable folder in systemd PATH?
+- Any writable systemd unit drop-in in /etc/systemd/system/<unit>.d/*.conf that can
+  override ExecStart/User?
+
+#### Timers
+- Any writable timer?
+
+#### Sockets
+- Any writable .socket file?
+- Can you communicate with any socket?
+- HTTP sockets with interesting info?
+
+#### D-Bus
+- Can you communicate with any D-Bus?
+
+#### Network
+- Enumerate the network to know where you are
+- Open ports you couldn't access before getting a shell inside the machine?
+- Can you sniff traffic using tcpdump?
+
+#### Users
+- Generic users/groups enumeration
+- Do you have a very big UID? Is the machine vulnerable?
+- Can you escalate privileges thanks to a group you belong to?
+- Clipboard data?
+- Password Policy?
+- Try to use every known password that you have discovered previously to login with
+  each possible user. Try to login also without a password.
+
+#### Writable PATH
+- If you have write privileges over some folder in PATH you may be able to escalate
+  privileges
+
+#### SUDO and SUID Commands
+- Can you execute any command with sudo? Can you use it to READ, WRITE or EXECUTE
+  anything as root? (GTFOBins)
+- If sudo -l allows sudoedit, check for sudoedit argument injection
+  (CVE-2023-22809) via SUDO_EDITOR/VISUAL/EDITOR to edit arbitrary files on
+  vulnerable versions (sudo -V < 1.9.12p2).
+  Example: SUDO_EDITOR="vim -- /etc/sudoers" sudoedit /etc/hosts
+- Is any exploitable SUID binary? (GTFOBins)
+- Are sudo commands limited by path? Can you bypass the restrictions?
+- Sudo/SUID binary without path indicated?
+- SUID binary specifying path? Bypass
+- LD_PRELOAD vuln
+- Lack of .so library in SUID binary from a writable folder?
+- SUDO tokens available? Can you create a SUDO token?
+- Can you read or modify sudoers files?
+- Can you modify /etc/ld.so.conf.d/?
+- OpenBSD DOAS command
+
+#### Capabilities
+- Has any binary any unexpected capability?
+
+#### ACLs
+- Has any file any unexpected ACL?
+
+#### Open Shell Sessions
+- screen
+- tmux
+
+#### SSH
+- Debian OpenSSL Predictable PRNG — CVE-2008-0166
+- SSH Interesting configuration values
+
+#### Interesting Files
+- Profile files — Read sensitive data? Write to privesc?
+- passwd/shadow files — Read sensitive data? Write to privesc?
+- Check commonly interesting folders for sensitive data
+- Weird Location/Owned files, you may have access to or alter executable files
+- Modified in last mins
+- Sqlite DB files
+- Hidden files
+- Script/Binaries in PATH
+- Web files (passwords?)
+- Backups?
+- Known files that contains passwords: Use LinPEAS and LaZagne
+- Generic search
+
+#### Writable Files
+- Modify python library to execute arbitrary commands?
+- Can you modify log files? Logtotten exploit
+- Can you modify /etc/sysconfig/network-scripts/? Centos/Redhat exploit
+- Can you write in ini, int.d, systemd or rc.d files?
+
+#### Other Tricks
+- Can you abuse NFS to escalate privileges?
+- Do you need to escape from a restrictive shell?
 
 ## Available Tools
 ` + a.formatToolsForPrompt() + `
@@ -382,6 +638,18 @@ func (a *Agent) act(toolCalls []ToolCall) ([]ToolResult, error) {
 	for _, tc := range toolCalls {
 		result, err := a.executeTool(tc)
 		if err != nil {
+			a.toolFailureCounts[tc.Function.Name]++
+			count := a.toolFailureCounts[tc.Function.Name]
+			a.logger.Warn("Tool call failed",
+				zap.String("tool", tc.Function.Name),
+				zap.Int("consecutive_failures", count),
+				zap.Int("max_failures", a.maxToolFailures),
+				zap.Error(err))
+
+			if count >= a.maxToolFailures {
+				return nil, fmt.Errorf("circuit breaker: tool %q failed %d consecutive times, aborting", tc.Function.Name, count)
+			}
+
 			results = append(results, ToolResult{
 				ToolID:  tc.ID,
 				Name:    tc.Function.Name,
@@ -389,6 +657,7 @@ func (a *Agent) act(toolCalls []ToolCall) ([]ToolResult, error) {
 				IsError: true,
 			})
 		} else {
+			a.toolFailureCounts[tc.Function.Name] = 0
 			results = append(results, result)
 		}
 	}
@@ -401,6 +670,8 @@ func (a *Agent) executeTool(tc ToolCall) (ToolResult, error) {
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("failed to parse args: %w", err)
 	}
+
+	a.logger.Debug("Executing tool", zap.String("tool", tc.Function.Name), zap.String("args", tc.Function.Arguments))
 
 	switch tc.Function.Name {
 	case "execute_trusted":
@@ -445,6 +716,13 @@ func (a *Agent) execExecuteTrusted(tc ToolCall, args map[string]any) (ToolResult
 				cmdArgs = append(cmdArgs, s)
 			}
 		}
+	}
+
+	// Handle LLM sending full command string (e.g. "cat /etc/passwd") as the command name
+	if len(cmdArgs) == 0 && strings.Contains(command, " ") {
+		parts := strings.Fields(command)
+		command = parts[0]
+		cmdArgs = parts[1:]
 	}
 
 	stdout, stderr, exitCode, err := a.cleanRoom.ExecuteTrusted(command, cmdArgs)

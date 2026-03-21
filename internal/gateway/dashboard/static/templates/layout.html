@@ -1,0 +1,129 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-950">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JAGR Dashboard</title>
+    <link rel="stylesheet" href="/assets/main.css">
+    <script src="/assets/main.js" type="module"></script>
+</head>
+<body class="h-full text-gray-200 antialiased">
+    <div class="min-h-full">
+        <nav class="bg-gray-900 border-b border-gray-800">
+            <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+                <div class="flex h-14 items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <a href="/" class="flex items-center gap-2">
+                            <span class="bg-emerald-500 text-white text-xs font-bold px-2 py-1 rounded">JAGR</span>
+                            <span class="text-gray-400 text-sm font-medium">Gateway Dashboard</span>
+                        </a>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="inline-flex items-center gap-1.5 text-xs text-gray-500">
+                            <span class="relative flex h-2 w-2">
+                                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                            </span>
+                            Live
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </nav>
+
+        <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
+            {{if eq .Page "index"}}
+                {{template "index_page" .}}
+            {{else if eq .Page "agent"}}
+                {{template "agent_page" .}}
+            {{else if eq .Page "session"}}
+                {{template "session_page" .}}
+            {{end}}
+        </main>
+    </div>
+</body>
+</html>
+{{end}}
+
+{{define "index_page"}}
+<div class="mb-8">
+    <h1 class="text-2xl font-semibold text-white">Overview</h1>
+    <p class="text-sm text-gray-500 mt-1">Real-time gateway monitoring</p>
+</div>
+
+<div id="stats" hx-get="/partials/stats" hx-trigger="load, every 30s" hx-swap="innerHTML">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-4 mb-8">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 animate-pulse"><div class="h-14 bg-gray-800 rounded-lg"></div></div>
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 animate-pulse"><div class="h-14 bg-gray-800 rounded-lg"></div></div>
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 animate-pulse"><div class="h-14 bg-gray-800 rounded-lg"></div></div>
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 animate-pulse"><div class="h-14 bg-gray-800 rounded-lg"></div></div>
+    </div>
+</div>
+
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Agents</h2>
+    </div>
+    <div id="agents-table" hx-get="/partials/agents" hx-trigger="load, every 10s" hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+{{end}}
+
+{{define "agent_page"}}
+<div class="mb-8">
+    <nav class="flex items-center gap-1.5 text-sm text-gray-500 mb-3">
+        <a href="/" class="hover:text-gray-300 transition-colors">Dashboard</a>
+        <svg class="h-3.5 w-3.5 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span class="text-gray-300">{{.Agent.Hostname}}</span>
+    </nav>
+    <h1 class="text-2xl font-semibold text-white">{{.Agent.Hostname}}</h1>
+    <p class="text-sm text-gray-500 mt-1">
+        <span class="font-mono text-xs bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">{{.Agent.ID}}</span>
+        <span class="mx-2 text-gray-700">|</span>
+        Enrolled {{formatTime .Agent.CreatedAt}}
+    </p>
+</div>
+
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Sessions</h2>
+    </div>
+    <div id="sessions-table"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions"
+         hx-trigger="load, every 10s"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+{{end}}
+
+{{define "session_page"}}
+<div class="mb-8">
+    <nav class="flex items-center gap-1.5 text-sm text-gray-500 mb-3">
+        <a href="/" class="hover:text-gray-300 transition-colors">Dashboard</a>
+        <svg class="h-3.5 w-3.5 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <a href="/agents/{{.Agent.ID}}" class="hover:text-gray-300 transition-colors">{{.Agent.Hostname}}</a>
+        <svg class="h-3.5 w-3.5 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span class="text-gray-300">Session {{shortID .Session.ID}}</span>
+    </nav>
+    <div class="flex items-center gap-3">
+        <h1 class="text-2xl font-semibold text-white">Session {{shortID .Session.ID}}</h1>
+        <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium {{statusColor .Session.Status}}">{{.Session.Status}}</span>
+    </div>
+    <p class="text-sm text-gray-500 mt-1">Created {{formatTime .Session.CreatedAt}} <span class="mx-1 text-gray-700">|</span> Updated {{formatTime .Session.UpdatedAt}}</p>
+</div>
+
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Messages</h2>
+    </div>
+    <div id="messages-list"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+{{end}}

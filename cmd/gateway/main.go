@@ -92,16 +92,19 @@ func loadConfig(path string) (*models.Config, error) {
 		config.RateLimit.MaxConcurrent = 5
 	}
 	if config.Session.TimeoutMinutes == 0 {
-		config.Session.TimeoutMinutes = 120
-	}
-	if config.Session.HistoryMode == "" {
-		config.Session.HistoryMode = "gateway"
+		config.Session.TimeoutMinutes = 30
 	}
 	if config.DefaultProvider == "" {
 		config.DefaultProvider = "openrouter"
 	}
 	if config.DefaultModel == "" {
 		config.DefaultModel = "default"
+	}
+	if config.Timeouts.ProviderTimeoutSeconds == 0 {
+		config.Timeouts.ProviderTimeoutSeconds = 300
+	}
+	if config.Timeouts.PricingFetchTimeoutSeconds == 0 {
+		config.Timeouts.PricingFetchTimeoutSeconds = 30
 	}
 
 	return &config, nil

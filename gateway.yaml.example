@@ -26,7 +26,6 @@ rate_limit:
 
 session:
   timeout_minutes: 120
-  history_mode: gateway
   max_tokens_per_session: 500000
 
 # Shared API key that all agents use to authenticate with this gateway.
@@ -54,6 +53,18 @@ providers:
 
 default_provider: openrouter
 default_model: default
+
+dashboard:
+  enabled: true
+  listen: ":8080"
+  # Optional: add users for basic auth. If omitted, no auth required.
+  # users:
+  #   - username: admin
+  #     password: changeme
+
+timeouts:
+  provider_timeout_seconds: 300      # upstream LLM provider request timeout
+  pricing_fetch_timeout_seconds: 30  # pricing/models metadata fetch timeout
 
 logging:
   level: info

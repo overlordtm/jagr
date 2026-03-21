@@ -414,12 +414,14 @@ func TestAgent_StartTime(t *testing.T) {
 		"test-key",
 		"audit",
 		10,
+		5,
 		"gpt-4",
 		"test objective",
 		"/tmp",
 		logger,
 		cleanRoom,
 		false,
+		0,
 	)
 	
 	if err != nil {

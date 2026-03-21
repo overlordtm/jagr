@@ -11,11 +11,12 @@ type Agent struct {
 }
 
 type Session struct {
-	ID        string    `json:"id"`
-	AgentID   string    `json:"agent_id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Status    string    `json:"status"`
+	ID            string     `json:"id"`
+	AgentID       string     `json:"agent_id"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	Status        string     `json:"status"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
 }
 
 type MessageLog struct {
@@ -28,6 +29,7 @@ type MessageLog struct {
 	Model       string    `json:"model,omitempty"`
 	TokensIn    int       `json:"tokens_in,omitempty"`
 	TokensOut   int       `json:"tokens_out,omitempty"`
+	CostUSD     float64   `json:"cost_usd,omitempty"`
 	LatencyMs   int       `json:"latency_ms,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }

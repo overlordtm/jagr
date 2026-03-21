@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
 
+	"github.com/overlordtm/jagr/internal/gateway/dashboard"
 	"github.com/overlordtm/jagr/internal/gateway/db"
 	"github.com/overlordtm/jagr/internal/gateway/models"
 	"github.com/overlordtm/jagr/internal/gateway/provider"
@@ -23,17 +24,9 @@ type Gateway struct {
 	config      *models.Config
 
 	mu          sync.RWMutex
-	sessions    map[string]*SessionState
+	// tracks per-session token usage for budget enforcement
+	tokenCounts map[string]int
 	rateLimiter *provider.RateLimiter
-}
-
-type SessionState struct {
-	ID           string
-	AgentID      string
-	HistoryMode  string
-	Messages     []models.Message
-	LastActivity time.Time
-	TotalTokens  int
 }
 
 func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
@@ -43,7 +36,7 @@ func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
 	}
 
 	providerConfig := &config.Providers[0]
-	p, err := provider.NewProvider(providerConfig, log)
+	p, err := provider.NewProvider(providerConfig, log, &config.Timeouts)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +46,7 @@ func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
 		log:         log,
 		provider:    p,
 		config:      config,
-		sessions:    make(map[string]*SessionState),
+		tokenCounts: make(map[string]int),
 		rateLimiter: provider.NewRateLimiter(config.RateLimit.RequestsPerMinute, config.RateLimit.MaxConcurrent),
 	}, nil
 }
@@ -62,6 +55,14 @@ func (g *Gateway) Start() error {
 	router := mux.NewRouter()
 
 	g.setupRoutes(router)
+
+	// Start session reaper
+	go g.sessionReaper()
+
+	// Start dashboard if enabled
+	if g.config.Dashboard.Enabled {
+		g.startDashboard()
+	}
 
 	addr := g.config.Server.Listen
 
@@ -85,10 +86,31 @@ func (g *Gateway) Start() error {
 	return http.ListenAndServe(addr, router)
 }
 
+func (g *Gateway) startDashboard() {
+	listen := g.config.Dashboard.Listen
+	if listen == "" {
+		listen = ":8080"
+	}
+
+	dash := dashboard.New(g.store, g.log.Named("dashboard"), &g.config.Dashboard)
+	dashRouter := mux.NewRouter()
+	dash.SetupRoutes(dashRouter)
+
+	go func() {
+		g.log.Info("Starting dashboard", zap.String("addr", listen))
+		if err := http.ListenAndServe(listen, dashRouter); err != nil {
+			g.log.Error("Dashboard server failed", zap.Error(err))
+		}
+	}()
+}
+
 func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/health", g.healthHandler).Methods("GET")
 	router.HandleFunc("/v1/chat/completions", g.chatCompletionsHandler).Methods("POST")
 	router.HandleFunc("/v1/models", g.modelsHandler).Methods("GET")
+
+	router.HandleFunc("/v1/heartbeat", g.heartbeatHandler).Methods("POST")
+	router.HandleFunc("/v1/sessions/close", g.closeSessionHandler).Methods("POST")
 
 	router.HandleFunc("/admin/agents", g.adminAgentsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions", g.adminSessionsHandler).Methods("GET")
@@ -167,19 +189,21 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	session := g.sessions[sessionID]
-
 	// Enforce per-session token budget
-	if maxTok := g.config.Session.MaxTokensPerSession; maxTok > 0 && session.TotalTokens >= maxTok {
+	g.mu.RLock()
+	totalTokens := g.tokenCounts[sessionID]
+	g.mu.RUnlock()
+
+	if maxTok := g.config.Session.MaxTokensPerSession; maxTok > 0 && totalTokens >= maxTok {
 		g.log.Warn("Session token budget exceeded",
-			zap.String("session_id", session.ID),
-			zap.Int("total_tokens", session.TotalTokens),
+			zap.String("session_id", sessionID),
+			zap.Int("total_tokens", totalTokens),
 			zap.Int("max_tokens", maxTok))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		json.NewEncoder(w).Encode(models.ErrorResponse{
 			Error: models.ErrorInfo{
-				Message: fmt.Sprintf("session token budget exceeded (%d/%d)", session.TotalTokens, maxTok),
+				Message: fmt.Sprintf("session token budget exceeded (%d/%d)", totalTokens, maxTok),
 				Type:    "token_budget_error",
 				Code:    "token_budget_exceeded",
 			},
@@ -187,21 +211,26 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	reqWithHistory, err := g.buildRequestWithHistory(req, session)
-	if err != nil {
-		g.log.Error("Failed to build request", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Store only NEW incoming messages in DB for dashboard visibility.
+	// The agent sends the full conversation each time, so skip messages
+	// we already have stored (the existing count acts as an offset).
+	existingCount, _ := g.store.GetMessageCount(sessionID)
+	if len(req.Messages) > existingCount {
+		for _, msg := range req.Messages[existingCount:] {
+			if msg.Role != "assistant" {
+				g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0)
+			}
+		}
 	}
 
 	// Handle streaming requests
 	if req.Stream {
-		g.handleStreamingRequest(w, r, agent, session, reqWithHistory)
+		g.handleStreamingRequest(w, r, agent, sessionID, req)
 		return
 	}
 
 	startTime := time.Now()
-	resp, err := g.provider.ChatCompletion(r.Context(), reqWithHistory)
+	resp, err := g.provider.ChatCompletion(r.Context(), req)
 	if err != nil {
 		g.log.Error("Provider request failed", zap.Error(err))
 		w.Header().Set("Content-Type", "application/json")
@@ -220,70 +249,53 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 
 	g.store.LogAudit(agent.ID, "request", map[string]any{
 		"model":     req.Model,
-		"messages":  reqWithHistory.Messages,
-		"tools":     reqWithHistory.Tools,
+		"messages":  len(req.Messages),
+		"stream":    false,
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 
+	// Calculate cost
+	var costUSD float64
+	if p, ok := g.provider.(*provider.OpenAICompatibleProvider); ok && resp.Usage != nil {
+		_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+
 	g.store.LogAudit(agent.ID, "response", map[string]any{
 		"model":       resp.Model,
-		"choices":     resp.Choices,
 		"tokens_in":   resp.Usage.PromptTokens,
 		"tokens_out":  resp.Usage.CompletionTokens,
+		"cost_usd":    costUSD,
 		"latency_ms":  latency,
 		"timestamp":   time.Now().UTC().Format(time.RFC3339),
 	})
 
-	session.Messages = append(session.Messages, models.Message{
+	g.log.Info("Request completed",
+		zap.String("model", resp.Model),
+		zap.Int("tokens_in", resp.Usage.PromptTokens),
+		zap.Int("tokens_out", resp.Usage.CompletionTokens),
+		zap.Float64("cost_usd", costUSD),
+		zap.Int64("latency_ms", latency),
+		zap.String("hostname", agent.Hostname))
+
+	if resp.Usage != nil {
+		g.mu.Lock()
+		g.tokenCounts[sessionID] += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		g.mu.Unlock()
+	}
+
+	g.store.AppendMessage(sessionID, &models.Message{
 		Role:      "assistant",
 		Content:   resp.Choices[0].Message.Content,
 		ToolCalls: resp.Choices[0].Message.ToolCalls,
-	})
-
-	if resp.Usage != nil {
-		session.TotalTokens += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
-	}
-
-	g.updateSession(session)
-
-	g.store.AppendMessage(session.ID, &models.Message{
-		Role:        "assistant",
-		Content:     resp.Choices[0].Message.Content,
-		ToolCalls:   resp.Choices[0].Message.ToolCalls,
-	}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, int(latency))
+	}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (g *Gateway) buildRequestWithHistory(req models.ChatCompletionRequest, session *SessionState) (models.ChatCompletionRequest, error) {
-	history := session.Messages
-
-	if len(req.Messages) == 1 && req.Messages[0].Role == "user" {
-		if session.HistoryMode == "gateway" || session.HistoryMode == "" {
-			req.Messages = append(history, req.Messages...)
-			return req, nil
-		}
-	}
-
-	return req, nil
-}
-
 func (g *Gateway) getOrCreateSession(agentID string) (string, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	existingSession, err := g.store.GetSessionForAgent(agentID)
 	if err == nil {
-		if _, ok := g.sessions[existingSession.ID]; !ok {
-			g.sessions[existingSession.ID] = &SessionState{
-				ID:           existingSession.ID,
-				AgentID:      agentID,
-				HistoryMode:  g.config.Session.HistoryMode,
-				Messages:     []models.Message{},
-				LastActivity: time.Now(),
-			}
-		}
 		return existingSession.ID, nil
 	}
 
@@ -292,31 +304,10 @@ func (g *Gateway) getOrCreateSession(agentID string) (string, error) {
 		return "", err
 	}
 
-	g.sessions[sess.ID] = &SessionState{
-		ID:           sess.ID,
-		AgentID:      agentID,
-		HistoryMode:  g.config.Session.HistoryMode,
-		Messages:     []models.Message{},
-		LastActivity: time.Now(),
-	}
-
 	return sess.ID, nil
 }
 
-func (g *Gateway) updateSession(session *SessionState) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if _, ok := g.sessions[session.ID]; ok {
-		session.LastActivity = time.Now()
-		g.sessions[session.ID] = session
-	}
-}
-
 func (g *Gateway) modelsHandler(w http.ResponseWriter, r *http.Request) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-
 	var modelList []models.Model
 	for _, p := range g.config.Providers {
 		for _, m := range p.Models {
@@ -334,6 +325,76 @@ func (g *Gateway) modelsHandler(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   modelList,
 	})
+}
+
+func (g *Gateway) sessionReaper() {
+	// 3 missed heartbeats at 10s interval = 30s threshold for inactive
+	heartbeatThreshold := 30 * time.Second
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Mark sessions as inactive if heartbeats are missed
+		if n, err := g.store.ReapStaleSessions(heartbeatThreshold); err != nil {
+			g.log.Error("Failed to reap stale sessions", zap.Error(err))
+		} else if n > 0 {
+			g.log.Info("Reaped stale sessions", zap.Int64("count", n))
+		}
+
+		// Close sessions that exceeded TimeoutMinutes since last message
+		if timeoutMin := g.config.Session.TimeoutMinutes; timeoutMin > 0 {
+			timeout := time.Duration(timeoutMin) * time.Minute
+			if n, err := g.store.CloseTimedOutSessions(timeout); err != nil {
+				g.log.Error("Failed to close timed-out sessions", zap.Error(err))
+			} else if n > 0 {
+				g.log.Info("Closed timed-out sessions", zap.Int64("count", n))
+			}
+		}
+	}
+}
+
+func (g *Gateway) heartbeatHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	sessionID, err := g.store.HeartbeatSession(agent.ID)
+	if err != nil {
+		g.log.Debug("Heartbeat: no active session", zap.String("agent_id", agent.ID))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	g.log.Debug("Heartbeat received", zap.String("session_id", sessionID), zap.String("hostname", agent.Hostname))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"session_id": sessionID, "status": "ok"})
+}
+
+func (g *Gateway) closeSessionHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		g.log.Debug("Close session: no active session", zap.String("agent_id", agent.ID))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if err := g.store.CloseSession(session.ID); err != nil {
+		g.log.Error("Failed to close session", zap.Error(err))
+		http.Error(w, "failed to close session", http.StatusInternalServerError)
+		return
+	}
+
+	g.log.Info("Session closed by agent", zap.String("session_id", session.ID), zap.String("hostname", agent.Hostname))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"session_id": session.ID, "status": "closed"})
 }
 
 func (g *Gateway) adminAgentsHandler(w http.ResponseWriter, r *http.Request) {
@@ -375,7 +436,7 @@ func (g *Gateway) adminMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages)
 }
 
-func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request, agent *models.Agent, session *SessionState, req models.ChatCompletionRequest) {
+func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request, agent *models.Agent, sessionID string, req models.ChatCompletionRequest) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -400,8 +461,7 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 
 	g.store.LogAudit(agent.ID, "request", map[string]any{
 		"model":     req.Model,
-		"messages":  req.Messages,
-		"tools":     req.Tools,
+		"messages":  len(req.Messages),
 		"stream":    true,
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
@@ -414,31 +474,40 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
+	// Calculate cost
+	var costUSD float64
+	if p, ok := g.provider.(*provider.OpenAICompatibleProvider); ok && resp.Usage != nil {
+		_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	}
+
 	g.store.LogAudit(agent.ID, "response", map[string]any{
 		"model":      resp.Model,
-		"choices":    resp.Choices,
 		"tokens_in":  resp.Usage.PromptTokens,
 		"tokens_out": resp.Usage.CompletionTokens,
+		"cost_usd":   costUSD,
 		"latency_ms": latency,
 		"stream":     true,
 		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 	})
 
+	g.log.Info("Streaming request completed",
+		zap.String("model", resp.Model),
+		zap.Int("tokens_in", resp.Usage.PromptTokens),
+		zap.Int("tokens_out", resp.Usage.CompletionTokens),
+		zap.Float64("cost_usd", costUSD),
+		zap.Int64("latency_ms", latency))
+
 	if len(resp.Choices) > 0 {
-		session.Messages = append(session.Messages, models.Message{
-			Role:      "assistant",
-			Content:   resp.Choices[0].Message.Content,
-			ToolCalls: resp.Choices[0].Message.ToolCalls,
-		})
 		if resp.Usage != nil {
-			session.TotalTokens += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+			g.mu.Lock()
+			g.tokenCounts[sessionID] += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+			g.mu.Unlock()
 		}
-		g.updateSession(session)
-		g.store.AppendMessage(session.ID, &models.Message{
+		g.store.AppendMessage(sessionID, &models.Message{
 			Role:      "assistant",
 			Content:   resp.Choices[0].Message.Content,
 			ToolCalls: resp.Choices[0].Message.ToolCalls,
-		}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, int(latency))
+		}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
 	}
 }
 

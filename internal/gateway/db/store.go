@@ -44,11 +44,12 @@ func (s *Store) createSchema() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS sessions (
-		id          TEXT PRIMARY KEY,
-		agent_id    TEXT NOT NULL REFERENCES agents(id),
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-		status      TEXT DEFAULT 'active'
+		id              TEXT PRIMARY KEY,
+		agent_id        TEXT NOT NULL REFERENCES agents(id),
+		created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+		status          TEXT DEFAULT 'active',
+		last_heartbeat  DATETIME
 	);
 
 	CREATE TABLE IF NOT EXISTS messages (
@@ -61,6 +62,7 @@ func (s *Store) createSchema() error {
 		model       TEXT,
 		tokens_in   INTEGER,
 		tokens_out  INTEGER,
+		cost_usd    REAL DEFAULT 0,
 		latency_ms  INTEGER,
 		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -77,8 +79,17 @@ func (s *Store) createSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_audit_agent_time ON audit_log(agent_id, created_at);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	// Migration: add last_heartbeat column if missing
+	s.db.Exec(`ALTER TABLE sessions ADD COLUMN last_heartbeat DATETIME`)
+
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Migration: add cost_usd column if missing (for existing databases)
+	s.db.Exec(`ALTER TABLE messages ADD COLUMN cost_usd REAL DEFAULT 0`)
+
+	return nil
 }
 
 // FindOrCreateAgentByHostname returns the agent for the given hostname,
@@ -173,16 +184,16 @@ func (s *Store) CreateSession(agentID string) (*models.Session, error) {
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, agent_id, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?)`,
-		sess.ID, sess.AgentID, sess.CreatedAt, sess.UpdatedAt, sess.Status,
+		`INSERT INTO sessions (id, agent_id, created_at, updated_at, status, last_heartbeat) VALUES (?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.AgentID, sess.CreatedAt, sess.UpdatedAt, sess.Status, now,
 	)
 	return sess, err
 }
 
 func (s *Store) GetSession(sessionID string) (*models.Session, error) {
 	var sess models.Session
-	err := s.db.QueryRow(`SELECT id, agent_id, created_at, updated_at, status FROM sessions WHERE id = ?`, sessionID).Scan(
-		&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status,
+	err := s.db.QueryRow(`SELECT id, agent_id, created_at, updated_at, status, last_heartbeat FROM sessions WHERE id = ?`, sessionID).Scan(
+		&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status, &sess.LastHeartbeat,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -196,9 +207,9 @@ func (s *Store) GetSession(sessionID string) (*models.Session, error) {
 func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
 	var sess models.Session
 	err := s.db.QueryRow(`
-		SELECT id, agent_id, created_at, updated_at, status FROM sessions
+		SELECT id, agent_id, created_at, updated_at, status, last_heartbeat FROM sessions
 		WHERE agent_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1
-	`, agentID).Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status)
+	`, agentID).Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status, &sess.LastHeartbeat)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -210,7 +221,7 @@ func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
 
 func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
 	rows, err := s.db.Query(`
-		SELECT id, agent_id, created_at, updated_at, status FROM sessions WHERE agent_id = ?
+		SELECT id, agent_id, created_at, updated_at, status, last_heartbeat FROM sessions WHERE agent_id = ?
 	`, agentID)
 	if err != nil {
 		return nil, err
@@ -220,7 +231,7 @@ func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
 	var sessions []models.Session
 	for rows.Next() {
 		var s models.Session
-		err := rows.Scan(&s.ID, &s.AgentID, &s.CreatedAt, &s.UpdatedAt, &s.Status)
+		err := rows.Scan(&s.ID, &s.AgentID, &s.CreatedAt, &s.UpdatedAt, &s.Status, &s.LastHeartbeat)
 		if err != nil {
 			return nil, err
 		}
@@ -239,6 +250,56 @@ func (s *Store) UpdateSessionUpdatedAt(sessionID string) error {
 	return err
 }
 
+// TouchHeartbeat updates the last_heartbeat timestamp for a session.
+func (s *Store) TouchHeartbeat(sessionID string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET last_heartbeat = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'`, sessionID)
+	return err
+}
+
+// ReapStaleSessions marks active sessions as "inactive" if they have not
+// received a heartbeat within the given threshold duration.
+func (s *Store) ReapStaleSessions(threshold time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-threshold)
+	result, err := s.db.Exec(`
+		UPDATE sessions SET status = 'inactive'
+		WHERE status = 'active' AND last_heartbeat IS NOT NULL AND last_heartbeat < ?
+	`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// CloseTimedOutSessions marks active/inactive sessions as "closed" if their
+// last message (updated_at) is older than the given timeout duration.
+func (s *Store) CloseTimedOutSessions(timeout time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-timeout)
+	result, err := s.db.Exec(`
+		UPDATE sessions SET status = 'closed'
+		WHERE status IN ('active', 'inactive') AND updated_at < ?
+	`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// HeartbeatSession finds the active session for an agent and touches its heartbeat.
+// Returns the session ID or ErrNotFound.
+func (s *Store) HeartbeatSession(agentID string) (string, error) {
+	var sessionID string
+	err := s.db.QueryRow(`
+		SELECT id FROM sessions WHERE agent_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1
+	`, agentID).Scan(&sessionID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return sessionID, s.TouchHeartbeat(sessionID)
+}
+
 func (s *Store) GetMessageCount(sessionID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&count)
@@ -253,19 +314,19 @@ func (s *Store) CountMessages(sessionID string) (int, error) {
 	return count, err
 }
 
-func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, tokensIn, tokensOut, latencyMs int) error {
+func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, tokensIn, tokensOut int, costUSD float64, latencyMs int) error {
 	toolCallsJSON, _ := json.Marshal(msg.ToolCalls)
 
 	_, err := s.db.Exec(`
-		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, latency_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, latencyMs)
+		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, costUSD, latencyMs)
 	return err
 }
 
 func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, latency_ms, created_at
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, created_at
 		FROM messages WHERE session_id = ? ORDER BY created_at ASC
 	`, sessionID)
 	if err != nil {
@@ -277,7 +338,7 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 	for rows.Next() {
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.LatencyMs, &m.CreatedAt)
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -291,7 +352,7 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 
 func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog, error) {
 	query := `
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, latency_ms, created_at
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, created_at
 		FROM messages WHERE session_id = ? AND (tool_calls IS NOT NULL OR role = 'tool')
 		ORDER BY created_at ASC
 	`
@@ -305,7 +366,7 @@ func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog,
 	for rows.Next() {
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.LatencyMs, &m.CreatedAt)
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -367,6 +428,31 @@ func (s *Store) GetAuditLog(agentID string, start, end time.Time, eventType stri
 		logs = append(logs, l)
 	}
 	return logs, rows.Err()
+}
+
+// DashboardStats holds aggregate statistics for the dashboard.
+type DashboardStats struct {
+	AgentCount     int     `json:"agent_count"`
+	ActiveSessions int     `json:"active_sessions"`
+	TotalMessages  int     `json:"total_messages"`
+	TotalCost      float64 `json:"total_cost"`
+}
+
+func (s *Store) GetDashboardStats() (*DashboardStats, error) {
+	stats := &DashboardStats{}
+
+	s.db.QueryRow(`SELECT COUNT(*) FROM agents`).Scan(&stats.AgentCount)
+	s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE status = 'active'`).Scan(&stats.ActiveSessions)
+	s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&stats.TotalMessages)
+	s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd), 0) FROM messages`).Scan(&stats.TotalCost)
+
+	return stats, nil
+}
+
+func (s *Store) GetSessionCost(sessionID string) (float64, error) {
+	var cost float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd), 0) FROM messages WHERE session_id = ?`, sessionID).Scan(&cost)
+	return cost, err
 }
 
 func (s *Store) Close() error {

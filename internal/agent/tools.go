@@ -45,7 +45,7 @@ func GetAvailableTools() []Tool {
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type":        "string",
-						"description": "The command to execute (e.g., 'ls', 'cat', 'grep')",
+						"description": "The command binary name only, without arguments (e.g., 'ls', 'cat', 'grep'). Pass arguments separately in the 'args' array.",
 					},
 					"args": map[string]any{
 						"type":        "array",

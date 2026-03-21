@@ -179,7 +179,7 @@ func TestAppendMessage(t *testing.T) {
 		Content: "Hello",
 	}
 
-	err := store.AppendMessage(session.ID, msg, "gpt-4", 10, 20, 100)
+	err := store.AppendMessage(session.ID, msg, "gpt-4", 10, 20, 0.001, 100)
 	if err != nil {
 		t.Fatalf("Failed to append message: %v", err)
 	}

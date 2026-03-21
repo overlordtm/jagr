@@ -1,0 +1,164 @@
+{{define "stats_partial"}}
+<div class="grid grid-cols-1 gap-4 sm:grid-cols-4 mb-8">
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Agents</dt>
+        <dd class="mt-2 text-3xl font-bold text-white tabular-nums">{{.AgentCount}}</dd>
+    </div>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Active Sessions</dt>
+        <dd class="mt-2 text-3xl font-bold text-emerald-400 tabular-nums">{{.ActiveSessions}}</dd>
+    </div>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Total Messages</dt>
+        <dd class="mt-2 text-3xl font-bold text-white tabular-nums">{{.TotalMessages}}</dd>
+    </div>
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Total Cost</dt>
+        <dd class="mt-2 text-3xl font-bold text-amber-400 tabular-nums">{{formatCost .TotalCost}}</dd>
+    </div>
+</div>
+{{end}}
+
+{{define "agents_partial"}}
+{{if .}}
+<table class="min-w-full">
+    <thead>
+        <tr class="border-b border-gray-800">
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Hostname</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sessions</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Active</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Enrolled</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .}}
+        <tr class="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors" onclick="window.location='/agents/{{.ID}}'">
+            <td class="px-5 py-4">
+                <div class="font-medium text-white">{{.Hostname}}</div>
+                <div class="text-xs font-mono text-gray-600 mt-0.5">{{shortID .ID}}</div>
+            </td>
+            <td class="px-5 py-4">
+                <span class="inline-flex items-center justify-center min-w-[1.5rem] rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-300">{{.SessionCount}}</span>
+            </td>
+            <td class="px-5 py-4 text-sm text-gray-400">{{.LastActive}}</td>
+            <td class="px-5 py-4 text-sm text-gray-500">{{timeAgo .CreatedAt}}</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{else}}
+<div class="p-12 text-center">
+    <p class="text-gray-600">No agents registered yet.</p>
+    <p class="text-xs text-gray-700 mt-1">Agents will appear here once they connect to the gateway.</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "sessions_partial"}}
+{{if .Sessions}}
+<table class="min-w-full">
+    <thead>
+        <tr class="border-b border-gray-800">
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Messages</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Updated</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Sessions}}
+        <tr class="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors" onclick="window.location='/agents/{{.AgentID}}/sessions/{{.ID}}'">
+            <td class="px-5 py-4">
+                <span class="font-mono text-sm text-gray-300">{{shortID .ID}}</span>
+            </td>
+            <td class="px-5 py-4">
+                <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium {{statusColor .Status}}">{{.Status}}</span>
+            </td>
+            <td class="px-5 py-4">
+                <span class="inline-flex items-center justify-center min-w-[1.5rem] rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-300">{{.MessageCount}}</span>
+            </td>
+            <td class="px-5 py-4 text-sm text-gray-400 tabular-nums">{{formatCost .TotalCost}}</td>
+            <td class="px-5 py-4 text-sm text-gray-500">{{timeAgo .CreatedAt}}</td>
+            <td class="px-5 py-4 text-sm text-gray-500">{{timeAgo .UpdatedAt}}</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+{{else}}
+<div class="p-12 text-center">
+    <p class="text-gray-600">No sessions for this agent.</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "messages_partial"}}
+{{if .}}
+<div class="divide-y divide-gray-800/50">
+    {{range .}}
+    <div class="px-5 py-4 hover:bg-gray-800/30 transition-colors">
+        <div class="flex items-center flex-wrap gap-2 mb-2">
+            <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-semibold {{roleColor .Role}}">{{.Role}}</span>
+            {{if .ToolCallID}}<span class="text-xs font-mono text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{shortID .ToolCallID}}</span>{{end}}
+            {{if .Model}}<span class="text-xs text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{.Model}}</span>{{end}}
+            {{if .TokensIn}}<span class="text-xs text-gray-500 tabular-nums">{{.TokensIn}}+{{.TokensOut}} tok</span>{{end}}
+            {{if gt .CostUSD 0.0}}<span class="text-xs text-amber-500/80 tabular-nums">{{formatCost .CostUSD}}</span>{{end}}
+            {{if .LatencyMs}}<span class="text-xs text-gray-600 tabular-nums">{{.LatencyMs}}ms</span>{{end}}
+            <span class="text-xs text-gray-600 ml-auto tabular-nums">{{formatTime .CreatedAt}}</span>
+        </div>
+
+        {{if .Content}}
+            {{if isLong .Content}}
+            <details class="pl-1">
+                <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-300 transition-colors">{{truncate .Content 120}}</summary>
+                <div class="mt-1 text-sm text-gray-300 whitespace-pre-wrap break-words max-h-96 overflow-y-auto leading-relaxed">{{.Content}}</div>
+            </details>
+            {{else}}
+            <div class="text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed pl-1">{{.Content}}</div>
+            {{end}}
+        {{end}}
+
+        {{if hasToolCalls .ToolCalls}}
+        {{$calls := parseToolCalls .ToolCalls}}
+        {{range $calls}}
+            {{if .IsFinding}}
+            <div class="mt-2 border border-gray-700 rounded-lg overflow-hidden">
+                <div class="flex items-center gap-2 px-3 py-2 bg-gray-800/80">
+                    <svg class="h-4 w-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+                    <span class="text-xs font-semibold text-amber-400">Finding</span>
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-bold {{severityColor .FindingSeverity}}">{{.FindingSeverity}}</span>
+                    {{if .FindingType}}<span class="text-xs text-gray-400">{{.FindingType}}</span>{{end}}
+                </div>
+                {{if .FindingObservable}}
+                <div class="px-3 py-2 text-sm text-gray-300">{{.FindingObservable}}</div>
+                {{end}}
+                <details>
+                    <summary class="px-3 py-1.5 text-xs text-purple-400 cursor-pointer hover:text-purple-300 transition-colors border-t border-gray-800">Full details</summary>
+                    <pre class="px-3 py-2 text-xs text-gray-400 bg-gray-950 overflow-x-auto whitespace-pre-wrap">{{.Arguments}}</pre>
+                </details>
+            </div>
+            {{else}}
+            <div class="mt-2 border border-gray-800 rounded-lg overflow-hidden">
+                <div class="flex items-center gap-2 px-3 py-2 bg-gray-800/50">
+                    <svg class="h-3.5 w-3.5 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    <span class="text-xs font-medium text-purple-400">{{.Name}}</span>
+                    {{if .ID}}<span class="text-xs font-mono text-gray-600">{{shortID .ID}}</span>{{end}}
+                </div>
+                <details>
+                    <summary class="px-3 py-1.5 text-xs text-gray-500 cursor-pointer hover:text-gray-400 transition-colors border-t border-gray-800/50">Arguments</summary>
+                    <pre class="px-3 py-2 text-xs text-gray-400 bg-gray-950 overflow-x-auto whitespace-pre-wrap">{{.Arguments}}</pre>
+                </details>
+            </div>
+            {{end}}
+        {{end}}
+        {{end}}
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="p-12 text-center">
+    <p class="text-gray-600">No messages in this session.</p>
+</div>
+{{end}}
+{{end}}

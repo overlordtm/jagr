@@ -18,9 +18,11 @@ import (
 var toolsFS embed.FS
 
 type CleanRoom struct {
-	WorkDir     string
-	ToolPaths   map[string]string
-	ToolHashes  map[string]string
+	WorkDir        string
+	ToolPaths      map[string]string
+	ToolHashes     map[string]string
+	DefaultTimeout time.Duration
+	LongTimeout    time.Duration
 }
 
 func NewCleanRoom() (*CleanRoom, error) {
@@ -30,9 +32,11 @@ func NewCleanRoom() (*CleanRoom, error) {
 	}
 
 	cr := &CleanRoom{
-		WorkDir:    workDir,
-		ToolPaths:  make(map[string]string),
-		ToolHashes: make(map[string]string),
+		WorkDir:        workDir,
+		ToolPaths:      make(map[string]string),
+		ToolHashes:     make(map[string]string),
+		DefaultTimeout: DefaultCommandTimeout,
+		LongTimeout:    DefaultLongCommandTimeout,
 	}
 
 	if err := cr.setupTools(); err != nil {
@@ -210,20 +214,20 @@ func (cr *CleanRoom) GetToolPath(name string) string {
 	return cr.ToolPaths[name]
 }
 
-// DefaultTimeout is the default per-command execution timeout.
-const DefaultTimeout = 120 * time.Second
+// DefaultCommandTimeout is the default per-command execution timeout.
+const DefaultCommandTimeout = 120 * time.Second
 
-// LongTimeout is for long-running tools like linpeas and pspy.
-const LongTimeout = 600 * time.Second
+// DefaultLongCommandTimeout is for long-running tools like linpeas and pspy.
+const DefaultLongCommandTimeout = 600 * time.Second
 
 // ExecuteTrusted runs a command in the Clean Room with the default timeout.
 func (cr *CleanRoom) ExecuteTrusted(command string, args []string) (string, string, int, error) {
-	return cr.ExecuteTrustedWithTimeout(command, args, DefaultTimeout)
+	return cr.ExecuteTrustedWithTimeout(command, args, cr.DefaultTimeout)
 }
 
 // ExecuteTrustedLong runs a command with the extended timeout (for linpeas, pspy).
 func (cr *CleanRoom) ExecuteTrustedLong(command string, args []string) (string, string, int, error) {
-	return cr.ExecuteTrustedWithTimeout(command, args, LongTimeout)
+	return cr.ExecuteTrustedWithTimeout(command, args, cr.LongTimeout)
 }
 
 // ExecuteTrustedWithTimeout runs a command in the sanitized Clean Room environment

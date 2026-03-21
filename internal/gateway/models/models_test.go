@@ -22,7 +22,6 @@ func TestConfigStruct(t *testing.T) {
 		},
 		Session: SessionConfig{
 			TimeoutMinutes: 30,
-			HistoryMode:    "gateway",
 		},
 		Providers: []ProviderConfig{
 			{

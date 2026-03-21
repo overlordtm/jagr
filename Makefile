@@ -1,4 +1,4 @@
-.PHONY: all build build-agent build-gateway test clean tools fetch-tools patch-busybox build-busybox
+.PHONY: all build build-agent build-gateway build-dashboard test clean tools fetch-tools patch-busybox build-busybox
 
 AGENT_BIN   := dist/jagr-agent
 GATEWAY_BIN := dist/jagr-gateway
@@ -22,7 +22,12 @@ build-agent:
 	@mkdir -p dist
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(AGENT_BIN)-$(GOOS)-$(GOARCH) ./cmd/agent
 
-build-gateway:
+build-dashboard:
+	cd web && npm install && npx vite build
+	cp web/dist/assets/main.js internal/gateway/dashboard/static/assets/main.js
+	cp web/dist/assets/main.css internal/gateway/dashboard/static/assets/main.css
+
+build-gateway: build-dashboard
 	@mkdir -p dist
 	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(GATEWAY_BIN)-$(GOOS)-$(GOARCH) ./cmd/gateway
 

@@ -20,22 +20,35 @@ type Provider interface {
 }
 
 type OpenAICompatibleProvider struct {
-	config   *models.ProviderConfig
-	baseURL  string
-	apiKey   string
-	log      *zap.Logger
+	config          *models.ProviderConfig
+	baseURL         string
+	apiKey          string
+	log             *zap.Logger
+	Pricing         *PricingCache
+	requestTimeout  time.Duration
 }
 
-func NewProvider(config *models.ProviderConfig, log *zap.Logger) (Provider, error) {
+func NewProvider(config *models.ProviderConfig, log *zap.Logger, timeouts *models.TimeoutConfig) (Provider, error) {
 	if config.Type != "openai_compatible" {
 		return nil, fmt.Errorf("unsupported provider type: %s", config.Type)
 	}
-	
+
+	baseURL := strings.TrimSuffix(config.BaseURL, "/")
+	pricingTimeout := time.Duration(timeouts.PricingFetchTimeoutSeconds) * time.Second
+	pricing := NewPricingCache(baseURL, config.APIKey, log, pricingTimeout)
+
+	if err := pricing.Fetch(); err != nil {
+		log.Warn("Failed to fetch initial pricing (will retry)", zap.Error(err))
+	}
+	pricing.StartPeriodicRefresh(1 * time.Hour)
+
 	return &OpenAICompatibleProvider{
-		config:  config,
-		baseURL: strings.TrimSuffix(config.BaseURL, "/"),
-		apiKey:  config.APIKey,
-		log:     log,
+		config:         config,
+		baseURL:        baseURL,
+		apiKey:         config.APIKey,
+		log:            log,
+		Pricing:        pricing,
+		requestTimeout: time.Duration(timeouts.ProviderTimeoutSeconds) * time.Second,
 	}, nil
 }
 
@@ -81,11 +94,10 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		}
 	}
 	
-	p.log.Info("Forwarding request to provider",
+	p.log.Debug("Forwarding request to provider",
 		zap.String("model", req.Model),
 		zap.Int("messages", len(req.Messages)),
-		zap.String("base_url", p.baseURL),
-		zap.String("request_body", string(reqBytes)))
+		zap.String("base_url", p.baseURL))
 	
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewBuffer(reqBytes))
 	if err != nil {
@@ -97,7 +109,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{Timeout: p.requestTimeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
