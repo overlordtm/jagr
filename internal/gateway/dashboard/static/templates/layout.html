@@ -71,7 +71,7 @@
     <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-base font-semibold text-white">Agents</h2>
     </div>
-    <div id="agents-table" hx-get="/partials/agents" hx-trigger="load, every 10s" hx-swap="innerHTML">
+    <div id="agents-table" hx-get="/partials/agents" hx-trigger="load" hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>
 </div>
@@ -115,7 +115,7 @@
     </div>
     <div id="sessions-table"
          hx-get="/partials/agents/{{.Agent.ID}}/sessions"
-         hx-trigger="load, every 10s"
+         hx-trigger="load"
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>
@@ -178,6 +178,7 @@ function switchAgentTab(btn, tab) {
     <div class="flex items-center gap-3">
         <h1 class="text-2xl font-semibold text-white">Session {{shortID .Session.ID}}</h1>
         <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium {{statusColor .Session.Status}}">{{.Session.Status}}</span>
+        <span class="text-xs text-gray-400 font-mono">{{formatDuration .Duration}}</span>
     </div>
     <p class="text-sm text-gray-500 mt-1">Created {{formatTime .Session.CreatedAt}} <span class="mx-1 text-gray-700">|</span> Updated {{formatTime .Session.UpdatedAt}}</p>
 </div>
@@ -224,7 +225,7 @@ function switchAgentTab(btn, tab) {
     </div>
     <div id="messages-list"
          hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&page=1"
-         hx-trigger="load"
+         {{if eq .Session.Status "active"}}hx-trigger="load, every 5s"{{else}}hx-trigger="load"{{end}}
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>
@@ -239,7 +240,7 @@ function switchAgentTab(btn, tab) {
     </div>
     <div id="findings-list"
          hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/findings"
-         hx-trigger="load, every 10s"
+         {{if eq .Session.Status "active"}}hx-trigger="load, every 10s"{{else}}hx-trigger="load"{{end}}
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>

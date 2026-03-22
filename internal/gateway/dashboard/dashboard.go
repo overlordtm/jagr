@@ -43,6 +43,18 @@ func init() {
 		"formatTime": func(t time.Time) string {
 			return t.Format("2006-01-02 15:04:05")
 		},
+		"formatDuration": func(d time.Duration) string {
+			d = d.Round(time.Second)
+			h := d / time.Hour
+			d -= h * time.Hour
+			m := d / time.Minute
+			d -= m * time.Minute
+			s := d / time.Second
+			if h > 0 {
+				return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+			}
+			return fmt.Sprintf("%02d:%02d", m, s)
+		},
 		"formatCost": func(c float64) string {
 			if c < 0.01 {
 				return fmt.Sprintf("$%.4f", c)
@@ -397,6 +409,13 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var duration time.Duration
+	if session.Status == "active" {
+		duration = time.Since(session.CreatedAt)
+	} else {
+		duration = session.UpdatedAt.Sub(session.CreatedAt)
+	}
+
 	findingCount, _ := d.store.GetSessionFindingCount(sessionID)
 	hasReport, _ := d.store.HasReport(sessionID)
 
@@ -404,6 +423,7 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 		"Page":         "session",
 		"Agent":        agent,
 		"Session":      session,
+		"Duration":     duration,
 		"FindingCount": findingCount,
 		"HasReport":    hasReport,
 	})
@@ -469,6 +489,7 @@ func (d *Dashboard) sessionsPartial(w http.ResponseWriter, r *http.Request) {
 		TotalCost    float64
 		FindingCount int
 		HasReport    bool
+		Duration     time.Duration
 	}
 
 	var rows []sessionRow
@@ -477,12 +498,21 @@ func (d *Dashboard) sessionsPartial(w http.ResponseWriter, r *http.Request) {
 		cost, _ := d.store.GetSessionCost(s.ID)
 		findingCount, _ := d.store.GetSessionFindingCount(s.ID)
 		hasReport, _ := d.store.HasReport(s.ID)
+
+		var duration time.Duration
+		if s.Status == "active" {
+			duration = time.Since(s.CreatedAt)
+		} else {
+			duration = s.UpdatedAt.Sub(s.CreatedAt)
+		}
+
 		rows = append(rows, sessionRow{
 			Session:      s,
 			MessageCount: count,
 			TotalCost:    cost,
 			FindingCount: findingCount,
 			HasReport:    hasReport,
+			Duration:     duration,
 		})
 	}
 
