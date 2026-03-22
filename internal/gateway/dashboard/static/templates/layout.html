@@ -207,14 +207,14 @@ function switchAgentTab(btn, tab) {
         <h2 class="text-base font-semibold text-white">Messages</h2>
         <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
             <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
-                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological"
+                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&page=1"
                     hx-target="#messages-list"
                     hx-swap="innerHTML"
                     data-sort="chronological">
                 Chronological
             </button>
             <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
-                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent"
+                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent&page=1"
                     hx-target="#messages-list"
                     hx-swap="innerHTML"
                     data-sort="agent">
@@ -223,8 +223,8 @@ function switchAgentTab(btn, tab) {
         </div>
     </div>
     <div id="messages-list"
-         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological"
-         hx-trigger="load, every 5s"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&page=1"
+         hx-trigger="load"
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>

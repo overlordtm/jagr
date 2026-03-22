@@ -63,12 +63,14 @@ type SessionReport struct {
 }
 
 type SessionAgentConfig struct {
-	ID        int       `json:"id"`
-	SessionID string    `json:"session_id"`
-	Role      string    `json:"role"`
-	Model     string    `json:"model"`
-	Temperature float32 `json:"temperature"`
-	TopP      float32   `json:"top_p"`
-	TopK      int       `json:"top_k"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          int       `json:"id"`
+	SessionID   string    `json:"session_id"`
+	Role        string    `json:"role"`
+	Model       string    `json:"model"`
+	ActualModel string    `json:"actual_model"`
+	Provider    string    `json:"provider"`
+	Temperature float32   `json:"temperature"`
+	TopP        float32   `json:"top_p"`
+	TopK        int       `json:"top_k"`
+	CreatedAt   time.Time `json:"created_at"`
 }

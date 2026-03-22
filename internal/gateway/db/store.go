@@ -346,6 +346,42 @@ func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog,
 	return messages, rows.Err()
 }
 
+func (s *Store) GetSessionMessagesPaginated(sessionID string, limit, offset int) ([]models.MessageLog, int, error) {
+	var total int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, sub_agent_role, created_at
+		FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?
+	`, sessionID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var messages []models.MessageLog
+	for rows.Next() {
+		var m models.MessageLog
+		var toolCallsStr sql.NullString
+		var subAgentRole sql.NullString
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &subAgentRole, &m.CreatedAt)
+		if err != nil {
+			return nil, 0, err
+		}
+		if toolCallsStr.Valid {
+			m.ToolCalls = toolCallsStr.String
+		}
+		if subAgentRole.Valid {
+			m.SubAgentRole = subAgentRole.String
+		}
+		messages = append(messages, m)
+	}
+	return messages, total, rows.Err()
+}
+
 func (s *Store) GetEventsForSession(sessionID string) ([]models.MessageLog, error) {
 	return s.GetSessionMessages(sessionID)
 }
@@ -543,13 +579,29 @@ func (s *Store) AddAgentConfig(sessionID string, c *models.SessionAgentConfig) e
 	_, err := s.db.Exec(`
 		INSERT INTO session_agent_configs (session_id, role, model, temperature, top_p, top_k)
 		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, role) DO UPDATE SET
+			model = excluded.model,
+			temperature = excluded.temperature,
+			top_p = excluded.top_p,
+			top_k = excluded.top_k
 	`, sessionID, c.Role, c.Model, c.Temperature, c.TopP, c.TopK)
+	return err
+}
+
+func (s *Store) UpdateAgentConfigUpstream(sessionID, role, modelAlias, actualModel, provider string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_agent_configs (session_id, role, model, actual_model, provider)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, role) DO UPDATE SET
+			actual_model = excluded.actual_model,
+			provider = excluded.provider
+	`, sessionID, role, modelAlias, actualModel, provider)
 	return err
 }
 
 func (s *Store) GetSessionAgentConfigs(sessionID string) ([]models.SessionAgentConfig, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, role, model, temperature, top_p, top_k, created_at
+		SELECT id, session_id, role, model, actual_model, provider, temperature, top_p, top_k, created_at
 		FROM session_agent_configs WHERE session_id = ? ORDER BY role ASC
 	`, sessionID)
 	if err != nil {
@@ -560,7 +612,7 @@ func (s *Store) GetSessionAgentConfigs(sessionID string) ([]models.SessionAgentC
 	var configs []models.SessionAgentConfig
 	for rows.Next() {
 		var c models.SessionAgentConfig
-		if err := rows.Scan(&c.ID, &c.SessionID, &c.Role, &c.Model, &c.Temperature, &c.TopP, &c.TopK, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.SessionID, &c.Role, &c.Model, &c.ActualModel, &c.Provider, &c.Temperature, &c.TopP, &c.TopK, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		configs = append(configs, c)

@@ -299,6 +299,8 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		SubAgentRole: subAgentRole,
 	}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
 
+	g.store.UpdateAgentConfigUpstream(sessionID, subAgentRole, req.Model, resp.Model, g.config.Providers[0].Name)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -531,6 +533,8 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 			ToolCalls:    resp.Choices[0].Message.ToolCalls,
 			SubAgentRole: r.Header.Get("X-Sub-Agent-Role"),
 		}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
+
+		g.store.UpdateAgentConfigUpstream(sessionID, r.Header.Get("X-Sub-Agent-Role"), req.Model, resp.Model, g.config.Providers[0].Name)
 	}
 }
 

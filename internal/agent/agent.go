@@ -38,7 +38,7 @@ type Agent struct {
 	concluded        bool
 	toolFailureCounts map[string]int
 	profiles          map[string]AgentProfile
-	mu                sync.Mutex // protects findings, totalTokensIn, totalTokensOut
+	mu                sync.Mutex // protects profiles, findings, totalTokensIn, totalTokensOut
 }
 
 type AgentProfile struct {
@@ -100,7 +100,31 @@ func NewAgent(gatewayURL, apiKey, mode string, maxIter, maxToolFailures int, mod
 		httpClient:        httpClient,
 		startTime:         time.Now(),
 		toolFailureCounts: make(map[string]int),
+		profiles:          make(map[string]AgentProfile),
 	}, nil
+}
+
+func (a *Agent) RegisterProfile(role string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.profiles == nil {
+		a.profiles = make(map[string]AgentProfile)
+	}
+	if _, exists := a.profiles[role]; !exists {
+		a.profiles[role] = AgentProfile{
+			Model: a.model,
+		}
+	}
+}
+
+func (a *Agent) GetProfile(role string) (AgentProfile, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.profiles == nil {
+		return AgentProfile{}, false
+	}
+	p, ok := a.profiles[role]
+	return p, ok
 }
 
 func (a *Agent) Run() error {
@@ -207,13 +231,16 @@ func (a *Agent) fetchProfiles() {
 
 	var profiles map[string]AgentProfile
 	if err := json.NewDecoder(resp.Body).Decode(&profiles); err == nil {
+		a.mu.Lock()
 		if a.profiles == nil {
 			a.profiles = make(map[string]AgentProfile)
 		}
 		for k, v := range profiles {
 			a.profiles[k] = v
 		}
-		a.logger.Info("Loaded agent profiles from gateway", zap.Int("count", len(a.profiles)))
+		count := len(a.profiles)
+		a.mu.Unlock()
+		a.logger.Info("Loaded agent profiles from gateway", zap.Int("count", count))
 	} else {
 		a.logger.Debug("Failed to decode agent profiles", zap.Error(err))
 	}
@@ -863,12 +890,16 @@ func (a *Agent) submitReportToGateway(reportPath string) {
 }
 
 func (a *Agent) submitAgentSettingsToGateway() {
+	a.mu.Lock()
 	if len(a.profiles) == 0 {
+		a.mu.Unlock()
 		return
 	}
 
 	payload := map[string]any{"agents": a.profiles}
 	body, _ := json.Marshal(payload)
+	count := len(a.profiles)
+	a.mu.Unlock()
 
 	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/agent-settings", strings.NewReader(string(body)))
 	if err != nil {
@@ -885,5 +916,5 @@ func (a *Agent) submitAgentSettingsToGateway() {
 		return
 	}
 	resp.Body.Close()
-	a.logger.Info("Agent settings submitted to gateway", zap.Int("count", len(a.profiles)))
+	a.logger.Info("Agent settings submitted to gateway", zap.Int("count", count))
 }

@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -189,6 +190,12 @@ func init() {
 			var evidence []string
 			json.Unmarshal([]byte(s), &evidence)
 			return evidence
+		},
+		"add": func(a, b int) int {
+			return a + b
+		},
+		"subtract": func(a, b int) int {
+			return a - b
 		},
 		"groupMessagesByAgent": func(messages []models.MessageLog) []messageGroup {
 			order := []string{}
@@ -488,21 +495,38 @@ func (d *Dashboard) sessionsPartial(w http.ResponseWriter, r *http.Request) {
 func (d *Dashboard) messagesPartial(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	sessionID := vars["session_id"]
+	agentID := vars["agent_id"]
 
 	sortMode := r.URL.Query().Get("sort")
 	if sortMode != "agent" {
 		sortMode = "chronological"
 	}
 
-	messages, err := d.store.GetSessionMessages(sessionID)
+	page := 1
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	const perPage = 50
+
+	messages, total, err := d.store.GetSessionMessagesPaginated(sessionID, perPage, (page-1)*perPage)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	totalPages := (total + perPage - 1) / perPage
+	if totalPages < 1 {
+		totalPages = 1
+	}
+
 	d.render(w, "messages_partial", map[string]any{
-		"Messages": messages,
-		"SortMode": sortMode,
+		"Messages":   messages,
+		"SortMode":   sortMode,
+		"Page":       page,
+		"TotalPages": totalPages,
+		"Total":      total,
+		"AgentID":    agentID,
+		"SessionID":  sessionID,
 	})
 }
 

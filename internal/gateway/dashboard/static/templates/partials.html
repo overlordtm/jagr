@@ -189,9 +189,44 @@
     {{end}}
 </div>
 {{end}}
+{{template "messages_pagination" .}}
 {{else}}
 <div class="p-12 text-center">
     <p class="text-gray-600">No messages in this session.</p>
+</div>
+{{end}}
+{{end}}
+
+{{define "messages_pagination"}}
+{{if gt .TotalPages 1}}
+<div class="flex items-center justify-between px-5 py-3 border-t border-gray-800">
+    <span class="text-xs text-gray-500">{{.Total}} messages &middot; page {{.Page}} of {{.TotalPages}}</span>
+    <div class="flex items-center gap-1">
+        {{if gt .Page 1}}
+        <button class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors"
+                hx-get="/partials/agents/{{.AgentID}}/sessions/{{.SessionID}}/messages?sort={{.SortMode}}&page={{subtract .Page 1}}"
+                hx-target="#messages-list"
+                hx-swap="innerHTML">
+            Previous
+        </button>
+        {{else}}
+        <button class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800/50 text-gray-600 cursor-not-allowed" disabled>
+            Previous
+        </button>
+        {{end}}
+        {{if lt .Page .TotalPages}}
+        <button class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors"
+                hx-get="/partials/agents/{{.AgentID}}/sessions/{{.SessionID}}/messages?sort={{.SortMode}}&page={{add .Page 1}}"
+                hx-target="#messages-list"
+                hx-swap="innerHTML">
+            Next
+        </button>
+        {{else}}
+        <button class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800/50 text-gray-600 cursor-not-allowed" disabled>
+            Next
+        </button>
+        {{end}}
+    </div>
 </div>
 {{end}}
 {{end}}
@@ -250,7 +285,7 @@
 {{if .}}
 <div class="p-5">
     <div class="text-xs text-gray-500 mb-3">Generated {{timeAgo .CreatedAt}}</div>
-    <div class="prose prose-invert prose-sm max-w-none text-gray-300 whitespace-pre-wrap break-words leading-relaxed">{{.Content}}</div>
+    <div class="msg-content prose prose-invert prose-sm max-w-none text-gray-300 break-words leading-relaxed">{{.Content}}</div>
 </div>
 {{else}}
 <div class="p-12 text-center">

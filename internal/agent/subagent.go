@@ -26,6 +26,7 @@ type SubAgent struct {
 }
 
 func NewSubAgent(parent *Agent, role, systemPrompt, objective string, initialTools []Tool) *SubAgent {
+	parent.RegisterProfile(role)
 	return &SubAgent{
 		parent:            parent,
 		role:              role,
@@ -133,20 +134,19 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 		"messages": messages,
 	}
 	
-	if sa.parent.profiles != nil {
-		if profile, ok := sa.parent.profiles[sa.role]; ok {
-			if profile.Model != "" {
-				reqBody["model"] = profile.Model
-			}
-			if profile.Temperature > 0 {
-				reqBody["temperature"] = profile.Temperature
-			}
-			if profile.TopP > 0 {
-				reqBody["top_p"] = profile.TopP
-			}
-			if profile.TopK > 0 {
-				reqBody["top_k"] = profile.TopK
-			}
+	profile, hasProfile := sa.parent.GetProfile(sa.role)
+	if hasProfile {
+		if profile.Model != "" {
+			reqBody["model"] = profile.Model
+		}
+		if profile.Temperature > 0 {
+			reqBody["temperature"] = profile.Temperature
+		}
+		if profile.TopP > 0 {
+			reqBody["top_p"] = profile.TopP
+		}
+		if profile.TopK > 0 {
+			reqBody["top_k"] = profile.TopK
 		}
 	}
 	if len(tools) > 0 {
