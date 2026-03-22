@@ -1,2 +1,83 @@
 @import "tailwindcss";
 @source "../../internal/gateway/dashboard/static/templates";
+
+/* Markdown content styling */
+.msg-content h1,
+.msg-content h2,
+.msg-content h3 {
+  font-weight: 600;
+  color: var(--color-gray-200);
+  margin-top: 0.75em;
+  margin-bottom: 0.25em;
+}
+.msg-content h1 { font-size: 1.25em; }
+.msg-content h2 { font-size: 1.125em; }
+.msg-content h3 { font-size: 1em; }
+
+.msg-content p {
+  margin-bottom: 0.5em;
+}
+
+.msg-content ul,
+.msg-content ol {
+  padding-left: 1.5em;
+  margin-bottom: 0.5em;
+}
+.msg-content ul { list-style: disc; }
+.msg-content ol { list-style: decimal; }
+.msg-content li { margin-bottom: 0.125em; }
+
+.msg-content code {
+  background-color: var(--color-gray-800);
+  padding: 0.125em 0.375em;
+  border-radius: 0.25em;
+  font-size: 0.875em;
+}
+
+.msg-content pre {
+  background-color: var(--color-gray-950);
+  border: 1px solid var(--color-gray-800);
+  border-radius: 0.375em;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  margin-bottom: 0.5em;
+}
+.msg-content pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.8125em;
+}
+
+.msg-content blockquote {
+  border-left: 3px solid var(--color-gray-700);
+  padding-left: 0.75em;
+  color: var(--color-gray-400);
+  margin-bottom: 0.5em;
+}
+
+.msg-content a {
+  color: var(--color-sky-400);
+  text-decoration: underline;
+}
+
+.msg-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.5em;
+  font-size: 0.875em;
+}
+.msg-content th,
+.msg-content td {
+  border: 1px solid var(--color-gray-800);
+  padding: 0.375em 0.625em;
+  text-align: left;
+}
+.msg-content th {
+  background-color: var(--color-gray-800);
+  font-weight: 600;
+}
+
+.msg-content hr {
+  border-top: 1px solid var(--color-gray-800);
+  margin: 0.75em 0;
+}

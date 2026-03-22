@@ -1,4 +1,4 @@
-.PHONY: all build build-agent build-gateway build-dashboard test clean tools fetch-tools patch-busybox build-busybox
+.PHONY: all build build-agent build-gateway build-dashboard build-prod build-agent-prod build-gateway-prod compress-tools test clean tools fetch-tools patch-busybox build-busybox
 
 AGENT_BIN   := dist/jagr-agent
 GATEWAY_BIN := dist/jagr-gateway
@@ -11,6 +11,8 @@ PSPY_VERSION     ?= 1.2.1
 
 GOOS   ?= linux
 GOARCH ?= amd64
+
+PROD_FLAGS := -trimpath -ldflags="-s -w"
 
 all: fetch-tools build
 
@@ -30,6 +32,28 @@ build-dashboard:
 build-gateway: build-dashboard
 	@mkdir -p dist
 	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(GATEWAY_BIN)-$(GOOS)-$(GOARCH) ./cmd/gateway
+
+# --- Compress embedded tools with xz ---
+
+compress-tools:
+	@for f in $(TOOLS_DIR)/busybox $(TOOLS_DIR)/linpeas.sh $(TOOLS_DIR)/pspy $(TOOLS_DIR)/pspy64; do \
+		if [ -f "$$f" ] && [ ! -f "$$f.xz" -o "$$f" -nt "$$f.xz" ]; then \
+			echo "Compressing $$(basename $$f) with xz..."; \
+			xz -9 -k -f "$$f"; \
+		fi; \
+	done
+
+# --- Production Build (smallest binaries) ---
+
+build-prod: build-agent-prod build-gateway-prod
+
+build-agent-prod: compress-tools
+	@mkdir -p dist
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(PROD_FLAGS) -tags xzcompress -o $(AGENT_BIN)-$(GOOS)-$(GOARCH) ./cmd/agent
+
+build-gateway-prod: build-dashboard
+	@mkdir -p dist
+	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(PROD_FLAGS) -o $(GATEWAY_BIN)-$(GOOS)-$(GOARCH) ./cmd/gateway
 
 # --- Fetch Tools (downloaded at build time, not committed to repo) ---
 

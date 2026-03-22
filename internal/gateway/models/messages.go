@@ -1,11 +1,12 @@
 package models
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content,omitempty"`
-	Name    string `json:"name,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
+	Role         string     `json:"role"`
+	Content      string     `json:"content,omitempty"`
+	Name         string     `json:"name,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID   string     `json:"tool_call_id,omitempty"`
+	SubAgentRole string     `json:"sub_agent_role,omitempty"`
 }
 
 type ToolCall struct {

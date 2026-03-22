@@ -20,18 +20,19 @@ type Session struct {
 }
 
 type MessageLog struct {
-	ID          int       `json:"id"`
-	SessionID   string    `json:"session_id"`
-	Role        string    `json:"role"`
-	Content     string    `json:"content,omitempty"`
-	ToolCalls   string    `json:"tool_calls,omitempty"`
-	ToolCallID  string    `json:"tool_call_id,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	TokensIn    int       `json:"tokens_in,omitempty"`
-	TokensOut   int       `json:"tokens_out,omitempty"`
-	CostUSD     float64   `json:"cost_usd,omitempty"`
-	LatencyMs   int       `json:"latency_ms,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           int       `json:"id"`
+	SessionID    string    `json:"session_id"`
+	Role         string    `json:"role"`
+	Content      string    `json:"content,omitempty"`
+	ToolCalls    string    `json:"tool_calls,omitempty"`
+	ToolCallID   string    `json:"tool_call_id,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	TokensIn     int       `json:"tokens_in,omitempty"`
+	TokensOut    int       `json:"tokens_out,omitempty"`
+	CostUSD      float64   `json:"cost_usd,omitempty"`
+	LatencyMs    int       `json:"latency_ms,omitempty"`
+	SubAgentRole string    `json:"sub_agent_role,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type AuditLog struct {
@@ -39,5 +40,35 @@ type AuditLog struct {
 	AgentID   string    `json:"agent_id"`
 	EventType string    `json:"event_type"`
 	Payload   string    `json:"payload"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type SessionFinding struct {
+	ID         int       `json:"id"`
+	SessionID  string    `json:"session_id"`
+	FindingID  string    `json:"finding_id"`
+	Type       string    `json:"type"`
+	Severity   string    `json:"severity"`
+	Observable string    `json:"observable"`
+	Analysis   string    `json:"analysis"`
+	Evidence   string    `json:"evidence"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type SessionReport struct {
+	ID        int       `json:"id"`
+	SessionID string    `json:"session_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type SessionAgentConfig struct {
+	ID        int       `json:"id"`
+	SessionID string    `json:"session_id"`
+	Role      string    `json:"role"`
+	Model     string    `json:"model"`
+	Temperature float32 `json:"temperature"`
+	TopP      float32   `json:"top_p"`
+	TopK      int       `json:"top_k"`
 	CreatedAt time.Time `json:"created_at"`
 }

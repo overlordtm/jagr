@@ -1,28 +1,48 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/go .
 {
-	"name": "jagr",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/go:2-1.26-trixie",
-	"features": {
-		"ghcr.io/devcontainers-extra/features/act-asdf:2": {}
-	},
-	"remoteEnv": {
-		"GOTOOLCHAIN": "go1.26.1"
-	},
-	"mounts": [
-		"source=jagr-claude-config,target=/home/vscode/.claude,type=volume"
-	],
-	"postCreateCommand": "bash .devcontainer/post-install.sh",
-	"customizations": {
-		"vscode": {
-			"extensions": [
-				"Anthropic.claude-code"
-			],
+    "name": "jagr",
+    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+    "image": "mcr.microsoft.com/devcontainers/go:2-1.26-trixie",
+    "features": {
+        "ghcr.io/devcontainers-extra/features/act-asdf:2": {},
+        "ghcr.io/devcontainers-extra/features/node-asdf:0": {}
+    },
+    "remoteEnv": {
+        "GOTOOLCHAIN": "go1.26.1"
+    },
+    "mounts": [
+        "source=jagr-claude-config,target=/home/vscode/.claude,type=volume"
+    ],
+    "forwardPorts": [
+        8080,
+        8443,
+        5173
+    ],
+    "portsAttributes": {
+        "8080": {
+            "label": "JAGR Dashboard",
+            "onAutoForward": "silent"
+        },
+        "8443": {
+            "label": "JAGR Gateway API",
+            "onAutoForward": "silent"
+        },
+        "5173": {
+            "label": "Vite Dev Server",
+            "onAutoForward": "silent"
+        }
+    },
+    "postCreateCommand": "bash .devcontainer/post-install.sh",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "Anthropic.claude-code"
+            ],
             "settings": {
                 "claudeCode.allowDangerouslySkipPermissions": true,
                 "claudeCode.initialPermissionMode": "bypassPermissions"
             }
-		}
-	}
+        }
+    }
 }

@@ -9,18 +9,7 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "command": "go",
-            "args": [
-                "run",
-                "./cmd/agent",
-                "--gateway-url",
-                "http://localhost:8443",
-                "--api-key",
-                "test",
-                "--mode",
-                "batch",
-                "--tls-skip-verify"
-            ]
+            "command": "go run ./cmd/agent --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key --mode batch --tls-skip-verify"
         },
         {
             "label": "gateway",
@@ -28,13 +17,42 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "command": "go",
-            "args": [
-                "run",
-                "./cmd/gateway",
-                "--config",
-                "gateway.yaml"
-            ]
+            "command": "direnv exec . go run ./cmd/gateway --config gateway.yaml --log-format console"
+        },
+        {
+            "label": "web",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}/web"
+            },
+            "command": "npm run dev"
+        },
+        {
+            "label": "build-prod",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "make build-prod",
+            "group": {
+                "kind": "build"
+            }
+        },
+        {
+            "label": "build-agent-prod",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "make build-agent-prod"
+        },
+        {
+            "label": "build-gateway-prod",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "make build-gateway-prod"
         }
     ]
 }

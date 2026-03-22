@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 )
@@ -16,9 +17,12 @@ type SubAgent struct {
 	objective         string
 	conversation      []Message
 	iterations        int
+	maxIter           int // 0 means use parent's maxIter
 	concluded         bool
 	tools             []Tool
 	toolFailureCounts map[string]int
+	investigatorWg    sync.WaitGroup
+	delegatedTargets  map[string]bool
 }
 
 func NewSubAgent(parent *Agent, role, systemPrompt, objective string, initialTools []Tool) *SubAgent {
@@ -29,17 +33,23 @@ func NewSubAgent(parent *Agent, role, systemPrompt, objective string, initialToo
 		objective:         objective,
 		tools:             initialTools,
 		toolFailureCounts: make(map[string]int),
+		delegatedTargets:  make(map[string]bool),
 	}
 }
 
 func (sa *SubAgent) Run() error {
 	sa.parent.logger.Info("Starting SubAgent", zap.String("role", sa.role))
+	defer sa.investigatorWg.Wait()
 
 	prompt := sa.systemPrompt + "\n\n## Available Tools\n" + sa.formatToolsForPrompt()
 	sa.conversation = append(sa.conversation, Message{Role: "system", Content: prompt})
 	sa.conversation = append(sa.conversation, Message{Role: "user", Content: sa.objective})
 
-	for sa.iterations < sa.parent.maxIter {
+	iterLimit := sa.maxIter
+	if iterLimit == 0 {
+		iterLimit = sa.parent.maxIter
+	}
+	for sa.iterations < iterLimit {
 		sa.parent.logger.Info("SubAgent Thinking", zap.String("role", sa.role), zap.Int("iteration", sa.iterations+1))
 
 		toolCalls, err := sa.think()
@@ -149,6 +159,7 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sa.parent.apiKey)
 	req.Header.Set("X-Hostname", sa.parent.hostname())
+	req.Header.Set("X-Sub-Agent-Role", sa.role)
 
 	resp, err := sa.parent.httpClient.Do(req)
 	if err != nil {
@@ -162,12 +173,14 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 	}
 
 	if usage, ok := reply["usage"].(map[string]any); ok {
+		sa.parent.mu.Lock()
 		if promptTokens, ok := usage["prompt_tokens"].(float64); ok {
 			sa.parent.totalTokensIn += int(promptTokens)
 		}
 		if completionTokens, ok := usage["completion_tokens"].(float64); ok {
 			sa.parent.totalTokensOut += int(completionTokens)
 		}
+		sa.parent.mu.Unlock()
 	}
 
 	if choices, ok := reply["choices"].([]any); ok && len(choices) > 0 {
@@ -252,19 +265,30 @@ func (sa *SubAgent) executeTool(tc ToolCall) (ToolResult, error) {
 		}
 		target, _ := args["target"].(string)
 		contextStr, _ := args["context"].(string)
-		
-		sa.parent.logger.Info("Delegating investigation", zap.String("target", target))
-		err = sa.parent.runInvestigator(target, contextStr)
-		
-		content := fmt.Sprintf("Delegated investigation of %s to an Investigator Agent.", target)
-		if err != nil {
-			content = fmt.Sprintf("Failed to delegate investigation: %v", err)
+
+		// Deduplicate: don't delegate the same target twice
+		if sa.delegatedTargets[target] {
+			return ToolResult{
+				ToolID:  tc.ID,
+				Name:    tc.Function.Name,
+				Content: fmt.Sprintf("Investigation of %s already delegated. Continue with other targets or call conclude.", target),
+			}, nil
 		}
-		
+		sa.delegatedTargets[target] = true
+
+		sa.parent.logger.Info("Delegating investigation", zap.String("target", target))
+		sa.investigatorWg.Add(1)
+		go func() {
+			defer sa.investigatorWg.Done()
+			if err := sa.parent.runInvestigator(target, contextStr); err != nil {
+				sa.parent.logger.Error("Investigator failed", zap.String("target", target), zap.Error(err))
+			}
+		}()
+
 		return ToolResult{
 			ToolID:  tc.ID,
 			Name:    tc.Function.Name,
-			Content: content,
+			Content: fmt.Sprintf("Delegated investigation of %s to an Investigator Agent.", target),
 		}, nil
 	} else if tc.Function.Name == "conclude" {
 		args, err := ParseToolArguments(tc.Function.Arguments)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pressly/goose/v3"
 	"go.uber.org/zap"
 	_ "github.com/mattn/go-sqlite3"
 
@@ -28,68 +29,21 @@ func NewStore(dbPath string, log *zap.Logger) (*Store, error) {
 
 	store := &Store{db: db, log: log}
 
-	if err := store.createSchema(); err != nil {
+	if err := store.migrate(); err != nil {
 		return nil, err
 	}
 
 	return store, nil
 }
 
-func (s *Store) createSchema() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS agents (
-		id          TEXT PRIMARY KEY,
-		hostname    TEXT UNIQUE NOT NULL,
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
+func (s *Store) migrate() error {
+	goose.SetBaseFS(Migrations)
 
-	CREATE TABLE IF NOT EXISTS sessions (
-		id              TEXT PRIMARY KEY,
-		agent_id        TEXT NOT NULL REFERENCES agents(id),
-		created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-		status          TEXT DEFAULT 'active',
-		last_heartbeat  DATETIME
-	);
-
-	CREATE TABLE IF NOT EXISTS messages (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		session_id  TEXT NOT NULL REFERENCES sessions(id),
-		role        TEXT NOT NULL,
-		content     TEXT,
-		tool_calls  TEXT,
-		tool_call_id TEXT,
-		model       TEXT,
-		tokens_in   INTEGER,
-		tokens_out  INTEGER,
-		cost_usd    REAL DEFAULT 0,
-		latency_ms  INTEGER,
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE TABLE IF NOT EXISTS audit_log (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		agent_id    TEXT NOT NULL,
-		event_type  TEXT NOT NULL,
-		payload     TEXT NOT NULL,
-		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
-	CREATE INDEX IF NOT EXISTS idx_audit_agent_time ON audit_log(agent_id, created_at);
-	`
-
-	// Migration: add last_heartbeat column if missing
-	s.db.Exec(`ALTER TABLE sessions ADD COLUMN last_heartbeat DATETIME`)
-
-	if _, err := s.db.Exec(schema); err != nil {
+	if err := goose.SetDialect("sqlite3"); err != nil {
 		return err
 	}
 
-	// Migration: add cost_usd column if missing (for existing databases)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN cost_usd REAL DEFAULT 0`)
-
-	return nil
+	return goose.Up(s.db, "migrations")
 }
 
 // FindOrCreateAgentByHostname returns the agent for the given hostname,
@@ -306,6 +260,12 @@ func (s *Store) GetMessageCount(sessionID string) (int, error) {
 	return count, err
 }
 
+func (s *Store) GetMessageCountByRole(sessionID, subAgentRole string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ? AND sub_agent_role = ?`, sessionID, subAgentRole).Scan(&count)
+	return count, err
+}
+
 func (s *Store) CountMessages(sessionID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`
@@ -318,15 +278,15 @@ func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, 
 	toolCallsJSON, _ := json.Marshal(msg.ToolCalls)
 
 	_, err := s.db.Exec(`
-		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, costUSD, latencyMs)
+		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, sub_agent_role)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, costUSD, latencyMs, msg.SubAgentRole)
 	return err
 }
 
 func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, created_at
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, sub_agent_role, created_at
 		FROM messages WHERE session_id = ? ORDER BY created_at ASC
 	`, sessionID)
 	if err != nil {
@@ -338,12 +298,16 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 	for rows.Next() {
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &m.CreatedAt)
+		var subAgentRole sql.NullString
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &subAgentRole, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if toolCallsStr.Valid {
 			m.ToolCalls = toolCallsStr.String
+		}
+		if subAgentRole.Valid {
+			m.SubAgentRole = subAgentRole.String
 		}
 		messages = append(messages, m)
 	}
@@ -352,7 +316,7 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 
 func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog, error) {
 	query := `
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, created_at
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, sub_agent_role, created_at
 		FROM messages WHERE session_id = ? AND (tool_calls IS NOT NULL OR role = 'tool')
 		ORDER BY created_at ASC
 	`
@@ -366,12 +330,16 @@ func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog,
 	for rows.Next() {
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &m.CreatedAt)
+		var subAgentRole sql.NullString
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &subAgentRole, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if toolCallsStr.Valid {
 			m.ToolCalls = toolCallsStr.String
+		}
+		if subAgentRole.Valid {
+			m.SubAgentRole = subAgentRole.String
 		}
 		messages = append(messages, m)
 	}
@@ -453,6 +421,151 @@ func (s *Store) GetSessionCost(sessionID string) (float64, error) {
 	var cost float64
 	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd), 0) FROM messages WHERE session_id = ?`, sessionID).Scan(&cost)
 	return cost, err
+}
+
+// --- Findings ---
+
+func (s *Store) AddFinding(sessionID string, f *models.SessionFinding) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_findings (session_id, finding_id, type, severity, observable, analysis, evidence)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, f.FindingID, f.Type, f.Severity, f.Observable, f.Analysis, f.Evidence)
+	return err
+}
+
+func (s *Store) GetSessionFindings(sessionID string) ([]models.SessionFinding, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, finding_id, type, severity, observable, analysis, evidence, created_at
+		FROM session_findings WHERE session_id = ? ORDER BY created_at ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var findings []models.SessionFinding
+	for rows.Next() {
+		var f models.SessionFinding
+		if err := rows.Scan(&f.ID, &f.SessionID, &f.FindingID, &f.Type, &f.Severity, &f.Observable, &f.Analysis, &f.Evidence, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		findings = append(findings, f)
+	}
+	return findings, rows.Err()
+}
+
+func (s *Store) GetFindingsForAgent(agentID string) ([]models.SessionFinding, error) {
+	rows, err := s.db.Query(`
+		SELECT f.id, f.session_id, f.finding_id, f.type, f.severity, f.observable, f.analysis, f.evidence, f.created_at
+		FROM session_findings f
+		JOIN sessions s ON f.session_id = s.id
+		WHERE s.agent_id = ?
+		ORDER BY f.created_at DESC
+	`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var findings []models.SessionFinding
+	for rows.Next() {
+		var f models.SessionFinding
+		if err := rows.Scan(&f.ID, &f.SessionID, &f.FindingID, &f.Type, &f.Severity, &f.Observable, &f.Analysis, &f.Evidence, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		findings = append(findings, f)
+	}
+	return findings, rows.Err()
+}
+
+func (s *Store) GetSessionFindingCount(sessionID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM session_findings WHERE session_id = ?`, sessionID).Scan(&count)
+	return count, err
+}
+
+// --- Reports ---
+
+func (s *Store) AddReport(sessionID string, content string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_reports (session_id, content) VALUES (?, ?)
+	`, sessionID, content)
+	return err
+}
+
+func (s *Store) GetSessionReport(sessionID string) (*models.SessionReport, error) {
+	var r models.SessionReport
+	err := s.db.QueryRow(`
+		SELECT id, session_id, content, created_at FROM session_reports WHERE session_id = ? ORDER BY created_at DESC LIMIT 1
+	`, sessionID).Scan(&r.ID, &r.SessionID, &r.Content, &r.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *Store) GetReportsForAgent(agentID string) ([]models.SessionReport, error) {
+	rows, err := s.db.Query(`
+		SELECT r.id, r.session_id, r.content, r.created_at
+		FROM session_reports r
+		JOIN sessions s ON r.session_id = s.id
+		WHERE s.agent_id = ?
+		ORDER BY r.created_at DESC
+	`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reports []models.SessionReport
+	for rows.Next() {
+		var r models.SessionReport
+		if err := rows.Scan(&r.ID, &r.SessionID, &r.Content, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		reports = append(reports, r)
+	}
+	return reports, rows.Err()
+}
+
+func (s *Store) HasReport(sessionID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM session_reports WHERE session_id = ?`, sessionID).Scan(&count)
+	return count > 0, err
+}
+
+// --- Agent Configs ---
+
+func (s *Store) AddAgentConfig(sessionID string, c *models.SessionAgentConfig) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_agent_configs (session_id, role, model, temperature, top_p, top_k)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, sessionID, c.Role, c.Model, c.Temperature, c.TopP, c.TopK)
+	return err
+}
+
+func (s *Store) GetSessionAgentConfigs(sessionID string) ([]models.SessionAgentConfig, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, role, model, temperature, top_p, top_k, created_at
+		FROM session_agent_configs WHERE session_id = ? ORDER BY role ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var configs []models.SessionAgentConfig
+	for rows.Next() {
+		var c models.SessionAgentConfig
+		if err := rows.Scan(&c.ID, &c.SessionID, &c.Role, &c.Model, &c.Temperature, &c.TopP, &c.TopK, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		configs = append(configs, c)
+	}
+	return configs, rows.Err()
 }
 
 func (s *Store) Close() error {

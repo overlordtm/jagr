@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -37,6 +38,7 @@ type Agent struct {
 	concluded        bool
 	toolFailureCounts map[string]int
 	profiles          map[string]AgentProfile
+	mu                sync.Mutex // protects findings, totalTokensIn, totalTokensOut
 }
 
 type AgentProfile struct {
@@ -126,10 +128,8 @@ func (a *Agent) Run() error {
 		"LogAnalysis",
 	}
 
+	var wg sync.WaitGroup
 	for _, p := range phases {
-		a.logger.Info("Starting Phase", zap.String("phase", p))
-		objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nBegin your investigation phase.", hostContext)
-		
 		role := "phase_" + p
 		prompt, err := GetPrompt(role, map[string]interface{}{})
 		if err != nil {
@@ -137,11 +137,19 @@ func (a *Agent) Run() error {
 			continue
 		}
 
+		objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nBegin your investigation phase.", hostContext)
 		agent := NewSubAgent(a, role, prompt, objective, GetToolsForRole(role))
-		if err := agent.Run(); err != nil {
-			a.logger.Error("Phase agent failed", zap.String("phase", p), zap.Error(err))
-		}
+
+		wg.Add(1)
+		go func(phase string) {
+			defer wg.Done()
+			a.logger.Info("Starting Phase", zap.String("phase", phase))
+			if err := agent.Run(); err != nil {
+				a.logger.Error("Phase agent failed", zap.String("phase", phase), zap.Error(err))
+			}
+		}(p)
 	}
+	wg.Wait()
 
 	// Reporter Agent
 	a.logger.Info("Starting Reporter Agent")
@@ -156,13 +164,28 @@ func (a *Agent) Run() error {
 
 	a.generateReports("Multi-agent architecture concluded")
 
+	// Submit findings to gateway
+	a.submitFindingsToGateway()
+
+	// Submit report to gateway
+	a.submitReportToGateway(reportPath)
+
+	// Submit agent settings to gateway
+	a.submitAgentSettingsToGateway()
+
 	return nil
 }
+
+// maxInvestigatorIter caps how many iterations an investigator sub-agent can run.
+// Investigators drill into a single target, so they need far fewer iterations
+// than phase agents that scan broad categories.
+const maxInvestigatorIter = 10
 
 func (a *Agent) runInvestigator(target, contextStr string) error {
 	objective := fmt.Sprintf("Analyze target: %s\nContext: %s", target, contextStr)
 	prompt, _ := GetPrompt("investigator", nil)
 	investigator := NewSubAgent(a, "investigator", prompt, objective, GetToolsForRole("investigator"))
+	investigator.maxIter = maxInvestigatorIter
 	return investigator.Run()
 }
 
@@ -627,7 +650,24 @@ func (a *Agent) execSubmitFinding(tc ToolCall, args map[string]any) (ToolResult,
 		return ToolResult{}, err
 	}
 
+	a.mu.Lock()
+	// Deduplicate by observable
+	for _, existing := range a.findings {
+		if existing.Observable == finding.Observable {
+			a.mu.Unlock()
+			return ToolResult{
+				ToolID:  tc.ID,
+				Name:    tc.Function.Name,
+				Content: fmt.Sprintf("Finding for %q already submitted (id: %s). Do not resubmit. Call conclude to finish your investigation.", finding.Observable, existing.ID),
+			}, nil
+		}
+	}
+	// Auto-assign ID if empty
+	if finding.ID == "" {
+		finding.ID = fmt.Sprintf("finding-%d", len(a.findings)+1)
+	}
 	a.findings = append(a.findings, finding)
+	a.mu.Unlock()
 
 	a.logger.Info("Finding submitted",
 		zap.String("id", finding.ID),
@@ -637,7 +677,7 @@ func (a *Agent) execSubmitFinding(tc ToolCall, args map[string]any) (ToolResult,
 	return ToolResult{
 		ToolID:  tc.ID,
 		Name:    tc.Function.Name,
-		Content: fmt.Sprintf("Finding %s submitted", finding.ID),
+		Content: fmt.Sprintf("Finding %s submitted successfully. If you have no more findings, call conclude.", finding.ID),
 	}, nil
 }
 
@@ -766,4 +806,84 @@ type ReportMetadata struct {
 func saveJSON(path string, data any) error {
 	jsonBytes, _ := json.MarshalIndent(data, "", "  ")
 	return os.WriteFile(path, jsonBytes, 0644)
+}
+
+func (a *Agent) submitFindingsToGateway() {
+	if len(a.findings) == 0 {
+		return
+	}
+
+	payload := map[string]any{"findings": a.findings}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/findings", strings.NewReader(string(body)))
+	if err != nil {
+		a.logger.Error("Failed to create findings request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("Failed to submit findings to gateway", zap.Error(err))
+		return
+	}
+	resp.Body.Close()
+	a.logger.Info("Findings submitted to gateway", zap.Int("count", len(a.findings)))
+}
+
+func (a *Agent) submitReportToGateway(reportPath string) {
+	content, err := os.ReadFile(reportPath)
+	if err != nil {
+		a.logger.Error("Failed to read report for gateway submission", zap.Error(err))
+		return
+	}
+
+	payload := map[string]string{"content": string(content)}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/report", strings.NewReader(string(body)))
+	if err != nil {
+		a.logger.Error("Failed to create report request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("Failed to submit report to gateway", zap.Error(err))
+		return
+	}
+	resp.Body.Close()
+	a.logger.Info("Report submitted to gateway")
+}
+
+func (a *Agent) submitAgentSettingsToGateway() {
+	if len(a.profiles) == 0 {
+		return
+	}
+
+	payload := map[string]any{"agents": a.profiles}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/agent-settings", strings.NewReader(string(body)))
+	if err != nil {
+		a.logger.Error("Failed to create agent settings request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("Failed to submit agent settings to gateway", zap.Error(err))
+		return
+	}
+	resp.Body.Close()
+	a.logger.Info("Agent settings submitted to gateway", zap.Int("count", len(a.profiles)))
 }

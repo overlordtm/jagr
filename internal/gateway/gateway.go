@@ -92,7 +92,7 @@ func (g *Gateway) startDashboard() {
 		listen = ":8080"
 	}
 
-	dash := dashboard.New(g.store, g.log.Named("dashboard"), &g.config.Dashboard)
+	dash := dashboard.New(g.store, g.log.Named("dashboard"), &g.config.Dashboard, g.config)
 	dashRouter := mux.NewRouter()
 	dash.SetupRoutes(dashRouter)
 
@@ -112,6 +112,9 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 
 	router.HandleFunc("/v1/heartbeat", g.heartbeatHandler).Methods("POST")
 	router.HandleFunc("/v1/sessions/close", g.closeSessionHandler).Methods("POST")
+	router.HandleFunc("/v1/findings", g.submitFindingsHandler).Methods("POST")
+	router.HandleFunc("/v1/report", g.submitReportHandler).Methods("POST")
+	router.HandleFunc("/v1/agent-settings", g.submitAgentSettingsHandler).Methods("POST")
 
 	router.HandleFunc("/admin/agents", g.adminAgentsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions", g.adminSessionsHandler).Methods("GET")
@@ -212,13 +215,18 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Read sub-agent role from header (empty for main agent)
+	subAgentRole := r.Header.Get("X-Sub-Agent-Role")
+
 	// Store only NEW incoming messages in DB for dashboard visibility.
 	// The agent sends the full conversation each time, so skip messages
-	// we already have stored (the existing count acts as an offset).
-	existingCount, _ := g.store.GetMessageCount(sessionID)
+	// we already have stored. Count is scoped per sub-agent role because
+	// each sub-agent maintains its own independent conversation.
+	existingCount, _ := g.store.GetMessageCountByRole(sessionID, subAgentRole)
 	if len(req.Messages) > existingCount {
 		for _, msg := range req.Messages[existingCount:] {
 			if msg.Role != "assistant" {
+				msg.SubAgentRole = subAgentRole
 				g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0)
 			}
 		}
@@ -285,9 +293,10 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	g.store.AppendMessage(sessionID, &models.Message{
-		Role:      "assistant",
-		Content:   resp.Choices[0].Message.Content,
-		ToolCalls: resp.Choices[0].Message.ToolCalls,
+		Role:         "assistant",
+		Content:      resp.Choices[0].Message.Content,
+		ToolCalls:    resp.Choices[0].Message.ToolCalls,
+		SubAgentRole: subAgentRole,
 	}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
 
 	w.Header().Set("Content-Type", "application/json")
@@ -517,9 +526,10 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 			g.mu.Unlock()
 		}
 		g.store.AppendMessage(sessionID, &models.Message{
-			Role:      "assistant",
-			Content:   resp.Choices[0].Message.Content,
-			ToolCalls: resp.Choices[0].Message.ToolCalls,
+			Role:         "assistant",
+			Content:      resp.Choices[0].Message.Content,
+			ToolCalls:    resp.Choices[0].Message.ToolCalls,
+			SubAgentRole: r.Header.Get("X-Sub-Agent-Role"),
 		}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
 	}
 }
@@ -577,6 +587,123 @@ func (g *Gateway) adminEventsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (g *Gateway) submitFindingsHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Findings []struct {
+			ID         string   `json:"id"`
+			Type       string   `json:"type"`
+			Severity   string   `json:"severity"`
+			Observable string   `json:"observable"`
+			Analysis   string   `json:"analysis"`
+			Evidence   []string `json:"evidence"`
+		} `json:"findings"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		http.Error(w, "no active session", http.StatusBadRequest)
+		return
+	}
+
+	for _, f := range req.Findings {
+		evidenceJSON, _ := json.Marshal(f.Evidence)
+		g.store.AddFinding(session.ID, &models.SessionFinding{
+			FindingID:  f.ID,
+			Type:       f.Type,
+			Severity:   f.Severity,
+			Observable: f.Observable,
+			Analysis:   f.Analysis,
+			Evidence:   string(evidenceJSON),
+		})
+	}
+
+	g.log.Info("Findings submitted", zap.String("hostname", agent.Hostname), zap.Int("count", len(req.Findings)))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "count": len(req.Findings)})
+}
+
+func (g *Gateway) submitReportHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		http.Error(w, "no active session", http.StatusBadRequest)
+		return
+	}
+
+	if err := g.store.AddReport(session.ID, req.Content); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	g.log.Info("Report submitted", zap.String("hostname", agent.Hostname))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (g *Gateway) submitAgentSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Agents map[string]struct {
+			Model       string  `json:"model"`
+			Temperature float32 `json:"temperature"`
+			TopP        float32 `json:"top_p"`
+			TopK        int     `json:"top_k"`
+		} `json:"agents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		http.Error(w, "no active session", http.StatusBadRequest)
+		return
+	}
+
+	for role, cfg := range req.Agents {
+		g.store.AddAgentConfig(session.ID, &models.SessionAgentConfig{
+			Role:        role,
+			Model:       cfg.Model,
+			Temperature: cfg.Temperature,
+			TopP:        cfg.TopP,
+			TopK:        cfg.TopK,
+		})
+	}
+
+	g.log.Info("Agent settings submitted", zap.String("hostname", agent.Hostname), zap.Int("count", len(req.Agents)))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "count": len(req.Agents)})
 }
 
 func (g *Gateway) adminLogsHandler(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,7 @@ func main() {
 	var (
 		configPath string
 		verbose    bool
+		logFormat  string
 	)
 
 	rootCmd := &cobra.Command{
@@ -34,7 +35,22 @@ func main() {
 				level = zap.DebugLevel
 			}
 
-			zapConfig := zap.NewProductionConfig()
+			// CLI flag takes precedence, then environment variable, default is json
+			format := logFormat
+			if format == "" {
+				format = os.Getenv("LOG_FORMAT")
+			}
+			if format == "" {
+				format = "json"
+			}
+
+			var zapConfig zap.Config
+			if format == "console" {
+				zapConfig = zap.NewDevelopmentConfig()
+			} else {
+				zapConfig = zap.NewProductionConfig()
+			}
+
 			zapConfig.Level.SetLevel(level)
 			logger, err := zapConfig.Build()
 			if err != nil {
@@ -44,7 +60,7 @@ func main() {
 
 			logger.Info("Gateway starting",
 				zap.String("config", configPath),
-				zap.String("listen", config.Server.Listen))
+				zap.String("addr", config.Server.Listen))
 
 			// Create and start gateway
 			gw, err := gateway.NewGateway(config, logger)
@@ -58,6 +74,7 @@ func main() {
 
 	rootCmd.Flags().StringVar(&configPath, "config", "gateway.yaml", "Path to gateway config file")
 	rootCmd.Flags().BoolVar(&verbose, "verbose", false, "Verbose logging")
+	rootCmd.Flags().StringVar(&logFormat, "log-format", "", "Log format (json or console)")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

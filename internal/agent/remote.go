@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -26,7 +28,9 @@ type SSHHostConfig struct {
 
 // RemoteExec copies the running binary to a remote host via SSH and executes it
 // with the provided args (which should already have --remote stripped).
-func RemoteExec(logger *zap.Logger, remoteHost string, args []string) error {
+// If gatewayURL is non-empty, a reverse SSH tunnel is established so the remote
+// agent reaches the gateway through the launching host.
+func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localOutputDir string, args []string) error {
 	cfg, err := resolveSSHConfig(remoteHost)
 	if err != nil {
 		return fmt.Errorf("resolve ssh config for %s: %w", remoteHost, err)
@@ -53,6 +57,21 @@ func RemoteExec(logger *zap.Logger, remoteHost string, args []string) error {
 	}
 	defer client.Close()
 
+	// Set up reverse tunnel for gateway if URL is provided
+	if gatewayURL != "" {
+		tunnelURL, cleanup, err := setupReverseTunnel(client, logger, gatewayURL)
+		if err != nil {
+			return fmt.Errorf("setup reverse tunnel: %w", err)
+		}
+		defer cleanup()
+
+		// Rewrite --gateway-url in args to point through the tunnel
+		args = rewriteArg(args, "--gateway-url", tunnelURL)
+		logger.Info("Reverse tunnel established",
+			zap.String("original_gateway", gatewayURL),
+			zap.String("tunnel_gateway", tunnelURL))
+	}
+
 	// Get path to our own binary
 	selfPath, err := os.Executable()
 	if err != nil {
@@ -73,6 +92,11 @@ func RemoteExec(logger *zap.Logger, remoteHost string, args []string) error {
 		return fmt.Errorf("scp copy: %w", err)
 	}
 
+	// Use a fixed remote output directory; the agent will create the hostname
+	// subdirectory inside it automatically.
+	remoteOutputDir := "/tmp/jagr-output"
+	args = rewriteArg(args, "--output-dir", remoteOutputDir)
+
 	// Build remote command
 	cmdParts := []string{remotePath}
 	cmdParts = append(cmdParts, args...)
@@ -80,7 +104,173 @@ func RemoteExec(logger *zap.Logger, remoteHost string, args []string) error {
 
 	logger.Info("Executing on remote host", zap.String("command", remoteCmd))
 
-	return execRemote(client, remoteCmd, logger)
+	execErr := execRemote(client, remoteCmd, logger)
+
+	// Collect artifacts from remote host regardless of execution outcome
+	if localOutputDir != "" {
+		logger.Info("Collecting artifacts from remote host",
+			zap.String("remote_dir", remoteOutputDir),
+			zap.String("local_dir", localOutputDir))
+		if err := scpDownloadDir(client, remoteOutputDir, localOutputDir, logger); err != nil {
+			logger.Error("Failed to collect remote artifacts", zap.Error(err))
+		}
+	}
+
+	return execErr
+}
+
+// setupReverseTunnel creates a reverse SSH tunnel so the remote agent can reach
+// the gateway through the launching host. It returns the rewritten URL
+// (e.g. "https://127.0.0.1:43210") and a cleanup function.
+func setupReverseTunnel(client *ssh.Client, logger *zap.Logger, gatewayURL string) (string, func(), error) {
+	parsed, err := url.Parse(gatewayURL)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse gateway URL %q: %w", gatewayURL, err)
+	}
+
+	// Resolve the gateway host:port that is reachable from the launching host
+	gwHost := parsed.Host
+	if !strings.Contains(gwHost, ":") {
+		switch parsed.Scheme {
+		case "https":
+			gwHost += ":443"
+		default:
+			gwHost += ":80"
+		}
+	}
+
+	// Open a listener on the remote side (port 0 = OS picks a free port)
+	remoteListener, err := client.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", nil, fmt.Errorf("open remote listener: %w", err)
+	}
+
+	remoteAddr := remoteListener.Addr().String()
+	logger.Info("Reverse tunnel listener opened on remote",
+		zap.String("remote_addr", remoteAddr),
+		zap.String("local_target", gwHost))
+
+	// Proxy goroutine: accept connections on remote side, forward to local gateway
+	go func() {
+		for {
+			remoteConn, err := remoteListener.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			go forwardConnection(remoteConn, gwHost, logger)
+		}
+	}()
+
+	// Build the tunnel URL preserving the original scheme and path
+	tunnelURL := fmt.Sprintf("%s://%s", parsed.Scheme, remoteAddr)
+	if parsed.Path != "" && parsed.Path != "/" {
+		tunnelURL += parsed.Path
+	}
+
+	cleanup := func() {
+		remoteListener.Close()
+	}
+
+	return tunnelURL, cleanup, nil
+}
+
+// forwardConnection proxies a single connection from the remote tunnel to the
+// local gateway address.
+func forwardConnection(remoteConn net.Conn, localTarget string, logger *zap.Logger) {
+	defer remoteConn.Close()
+
+	localConn, err := net.Dial("tcp", localTarget)
+	if err != nil {
+		logger.Warn("Failed to connect to local gateway for tunnel",
+			zap.String("target", localTarget),
+			zap.Error(err))
+		return
+	}
+	defer localConn.Close()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(localConn, remoteConn)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(remoteConn, localConn)
+		done <- struct{}{}
+	}()
+	<-done
+}
+
+// rewriteArg replaces the value of a --flag=value style argument in args.
+func rewriteArg(args []string, flag, newValue string) []string {
+	prefix := flag + "="
+	result := make([]string, len(args))
+	for i, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			result[i] = prefix + newValue
+		} else {
+			result[i] = arg
+		}
+	}
+	return result
+}
+
+// scpDownloadDir downloads all files from a remote directory to a local directory.
+// It uses tar over SSH to transfer the directory contents.
+func scpDownloadDir(client *ssh.Client, remoteDir, localDir string, logger *zap.Logger) error {
+	// First check whether the remote directory exists and has any files.
+	// The remote agent may not have produced file artifacts.
+	checkSession, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session for check: %w", err)
+	}
+	if err := checkSession.Run(fmt.Sprintf("test -d %s && find %s -mindepth 1 -print -quit | grep -q .", remoteDir, remoteDir)); err != nil {
+		checkSession.Close()
+		logger.Info("Remote output directory is empty or missing, nothing to collect")
+		return nil
+	}
+	checkSession.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	defer session.Close()
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	// Use tar to stream the remote directory; -C changes into the dir so
+	// the archive contains relative paths.
+	if err := session.Start(fmt.Sprintf("tar cf - -C %s .", remoteDir)); err != nil {
+		return fmt.Errorf("start remote tar: %w", err)
+	}
+
+	if err := os.MkdirAll(localDir, 0700); err != nil {
+		return fmt.Errorf("create local dir: %w", err)
+	}
+
+	// Extract locally
+	extractCmd := fmt.Sprintf("tar xf - -C %s", localDir)
+	extract := execLocalCommand(extractCmd, stdout)
+	if extract != nil {
+		logger.Warn("Local tar extract failed, falling back to manual read", zap.Error(extract))
+	}
+
+	if err := session.Wait(); err != nil {
+		return fmt.Errorf("remote tar: %w", err)
+	}
+
+	return extract
+}
+
+// execLocalCommand runs a local shell command, piping r into its stdin.
+func execLocalCommand(cmd string, r io.Reader) error {
+	c := exec.Command("sh", "-c", cmd)
+	c.Stdin = r
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 // scpCopy copies a local file to the remote host using the SCP protocol over an SSH session.
@@ -102,15 +292,62 @@ func scpCopy(client *ssh.Client, localPath, remotePath string) error {
 	}
 	defer session.Close()
 
-	go func() {
-		w, _ := session.StdinPipe()
-		defer w.Close()
-		fmt.Fprintf(w, "C0755 %d %s\n", stat.Size(), filepath.Base(remotePath))
-		io.Copy(w, f)
-		fmt.Fprint(w, "\x00")
-	}()
+	w, err := session.StdinPipe()
+	if err != nil {
+		return err
+	}
 
-	return session.Run("scp -t " + remotePath)
+	r, err := session.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	var stderrBuf strings.Builder
+	session.Stderr = &stderrBuf
+
+	if err := session.Start("scp -t " + remotePath); err != nil {
+		return fmt.Errorf("start scp: %w", err)
+	}
+
+	// Helper to read SCP ack byte (0 = OK, 1 = warning, 2 = fatal)
+	ack := make([]byte, 1)
+	readAck := func() error {
+		if _, err := io.ReadFull(r, ack); err != nil {
+			return fmt.Errorf("read ack: %w", err)
+		}
+		if ack[0] != 0 {
+			return fmt.Errorf("scp server error (code %d): %s", ack[0], stderrBuf.String())
+		}
+		return nil
+	}
+
+	// Wait for initial ready ack
+	if err := readAck(); err != nil {
+		return err
+	}
+
+	// Send file header
+	fmt.Fprintf(w, "C0755 %d %s\n", stat.Size(), filepath.Base(remotePath))
+	if err := readAck(); err != nil {
+		return err
+	}
+
+	// Send file contents
+	if _, err := io.Copy(w, f); err != nil {
+		return fmt.Errorf("copy file data: %w", err)
+	}
+
+	// Send transfer complete
+	fmt.Fprint(w, "\x00")
+	if err := readAck(); err != nil {
+		return err
+	}
+
+	w.Close()
+	if err := session.Wait(); err != nil {
+		return fmt.Errorf("scp session: %w; stderr: %s", err, stderrBuf.String())
+	}
+	return nil
 }
 
 // execRemote runs a command on the remote host, streaming stdout/stderr to our own stdout/stderr.

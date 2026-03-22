@@ -13,11 +13,15 @@
         <nav class="bg-gray-900 border-b border-gray-800">
             <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
                 <div class="flex h-14 items-center justify-between">
-                    <div class="flex items-center gap-3">
+                    <div class="flex items-center gap-6">
                         <a href="/" class="flex items-center gap-2">
                             <span class="bg-emerald-500 text-white text-xs font-bold px-2 py-1 rounded">JAGR</span>
                             <span class="text-gray-400 text-sm font-medium">Gateway Dashboard</span>
                         </a>
+                        <nav class="flex items-center gap-4">
+                            <a href="/" class="text-sm text-gray-400 hover:text-white transition-colors">Overview</a>
+                            <a href="/configuration" class="text-sm text-gray-400 hover:text-white transition-colors">Configuration</a>
+                        </nav>
                     </div>
                     <div class="flex items-center gap-2">
                         <span class="inline-flex items-center gap-1.5 text-xs text-gray-500">
@@ -35,6 +39,8 @@
         <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
             {{if eq .Page "index"}}
                 {{template "index_page" .}}
+            {{else if eq .Page "configuration"}}
+                {{template "configuration_page" .}}
             {{else if eq .Page "agent"}}
                 {{template "agent_page" .}}
             {{else if eq .Page "session"}}
@@ -86,6 +92,23 @@
     </p>
 </div>
 
+<!-- Agent Tabs -->
+<div class="mb-6">
+    <div class="flex items-center gap-1 bg-gray-900 border border-gray-800 rounded-lg p-1">
+        <button class="agent-tab px-4 py-2 text-sm font-medium rounded-md transition-colors bg-gray-700 text-white" data-tab="sessions" onclick="switchAgentTab(this, 'sessions')">
+            Sessions
+        </button>
+        <button class="agent-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="all-findings" onclick="switchAgentTab(this, 'all-findings')">
+            All Findings
+        </button>
+        <button class="agent-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="all-reports" onclick="switchAgentTab(this, 'all-reports')">
+            All Reports
+        </button>
+    </div>
+</div>
+
+<!-- Sessions Tab -->
+<div id="agent-tab-sessions" class="agent-tab-content">
 <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
     <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-base font-semibold text-white">Sessions</h2>
@@ -97,6 +120,50 @@
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>
 </div>
+</div>
+
+<!-- All Findings Tab -->
+<div id="agent-tab-all-findings" class="agent-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">All Findings</h2>
+    </div>
+    <div id="agent-findings-list"
+         hx-get="/partials/agents/{{.Agent.ID}}/findings"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<!-- All Reports Tab -->
+<div id="agent-tab-all-reports" class="agent-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">All Reports</h2>
+    </div>
+    <div id="agent-reports-list"
+         hx-get="/partials/agents/{{.Agent.ID}}/reports"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<script>
+function switchAgentTab(btn, tab) {
+    document.querySelectorAll('.agent-tab-content').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.agent-tab').forEach(el => {
+        el.classList.remove('bg-gray-700', 'text-white');
+        el.classList.add('text-gray-400');
+    });
+    document.getElementById('agent-tab-' + tab).classList.remove('hidden');
+    btn.classList.remove('text-gray-400');
+    btn.classList.add('bg-gray-700', 'text-white');
+}
+</script>
 {{end}}
 
 {{define "session_page"}}
@@ -115,15 +182,110 @@
     <p class="text-sm text-gray-500 mt-1">Created {{formatTime .Session.CreatedAt}} <span class="mx-1 text-gray-700">|</span> Updated {{formatTime .Session.UpdatedAt}}</p>
 </div>
 
+<!-- Session Tabs -->
+<div class="mb-6">
+    <div class="flex items-center gap-1 bg-gray-900 border border-gray-800 rounded-lg p-1">
+        <button class="session-tab px-4 py-2 text-sm font-medium rounded-md transition-colors bg-gray-700 text-white" data-tab="messages" onclick="switchSessionTab(this, 'messages')">
+            Messages
+        </button>
+        <button class="session-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="findings" onclick="switchSessionTab(this, 'findings')">
+            Findings {{if .FindingCount}}<span class="ml-1 inline-flex items-center justify-center min-w-[1.25rem] rounded-full bg-amber-500/20 px-1.5 py-0.5 text-xs font-bold text-amber-400">{{.FindingCount}}</span>{{end}}
+        </button>
+        <button class="session-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="report" onclick="switchSessionTab(this, 'report')">
+            Report {{if .HasReport}}<span class="ml-1 inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>{{end}}
+        </button>
+        <button class="session-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="agent-configs" onclick="switchSessionTab(this, 'agent-configs')">
+            Agent Settings
+        </button>
+    </div>
+</div>
+
+<!-- Messages Tab -->
+<div id="tab-messages" class="session-tab-content">
 <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-    <div class="px-5 py-4 border-b border-gray-800">
+    <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
         <h2 class="text-base font-semibold text-white">Messages</h2>
+        <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
+            <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
+                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological"
+                    hx-target="#messages-list"
+                    hx-swap="innerHTML"
+                    data-sort="chronological">
+                Chronological
+            </button>
+            <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
+                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent"
+                    hx-target="#messages-list"
+                    hx-swap="innerHTML"
+                    data-sort="agent">
+                By Agent
+            </button>
+        </div>
     </div>
     <div id="messages-list"
-         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological"
          hx-trigger="load, every 5s"
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>
 </div>
+</div>
+
+<!-- Findings Tab -->
+<div id="tab-findings" class="session-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Findings</h2>
+    </div>
+    <div id="findings-list"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/findings"
+         hx-trigger="load, every 10s"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<!-- Report Tab -->
+<div id="tab-report" class="session-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Report</h2>
+    </div>
+    <div id="report-content"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/report"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<!-- Agent Settings Tab -->
+<div id="tab-agent-configs" class="session-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Agent Settings</h2>
+    </div>
+    <div id="agent-configs-content"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/agent-configs"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<script>
+function switchSessionTab(btn, tab) {
+    document.querySelectorAll('.session-tab-content').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.session-tab').forEach(el => {
+        el.classList.remove('bg-gray-700', 'text-white');
+        el.classList.add('text-gray-400');
+    });
+    document.getElementById('tab-' + tab).classList.remove('hidden');
+    btn.classList.remove('text-gray-400');
+    btn.classList.add('bg-gray-700', 'text-white');
+}
+</script>
 {{end}}

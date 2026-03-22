@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -59,7 +60,7 @@ func main() {
 				logger.Info("Remote mode enabled",
 					zap.String("remote_host", remoteHost),
 					zap.Strings("remote_args", remoteArgs))
-				return agent.RemoteExec(logger, remoteHost, remoteArgs)
+				return agent.RemoteExec(logger, remoteHost, gatewayURL, outputDir, remoteArgs)
 			}
 
 			// Validate required flags
@@ -79,11 +80,15 @@ func main() {
 				}
 			}
 
+			// Store artifacts under a hostname-specific subdirectory
+			outputDir = filepath.Join(outputDir, hostname)
+
 			logger.Info("Agent starting",
 				zap.String("gateway_url", gatewayURL),
 				zap.String("mode", mode),
 				zap.String("model", model),
-				zap.String("hostname", hostname))
+				zap.String("hostname", hostname),
+				zap.String("output_dir", outputDir))
 
 			// Create output directory
 			if err := os.MkdirAll(outputDir, 0700); err != nil {
