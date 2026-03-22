@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -28,6 +29,7 @@ func main() {
 		httpTimeoutSec        int
 		commandTimeoutSec     int
 		longCommandTimeoutSec int
+		remoteHost            string
 	)
 
 	rootCmd := &cobra.Command{
@@ -50,6 +52,15 @@ func main() {
 				return fmt.Errorf("failed to build logger: %w", err)
 			}
 			defer logger.Sync()
+
+			// Remote execution: copy self to remote host and run there
+			if remoteHost != "" {
+				remoteArgs := buildRemoteArgs(cmd)
+				logger.Info("Remote mode enabled",
+					zap.String("remote_host", remoteHost),
+					zap.Strings("remote_args", remoteArgs))
+				return agent.RemoteExec(logger, remoteHost, remoteArgs)
+			}
 
 			// Validate required flags
 			if gatewayURL == "" {
@@ -120,48 +131,83 @@ func main() {
 	}
 
 	flags := rootCmd.Flags()
-	flags.StringVar(&gatewayURL, "gateway-url", "", "Gateway server URL (required)")
-	flags.StringVar(&apiKey, "api-key", "", "API key for gateway auth")
-	flags.StringVar(&mode, "mode", "interactive", "Execution mode: batch | interactive")
-	flags.IntVar(&maxIterations, "max-iterations", 50, "Maximum ReAct loop iterations")
-	flags.IntVar(&maxToolFailures, "max-tool-failures", 5, "Max consecutive failures per tool before circuit breaker trips")
-	flags.StringVar(&model, "model", "default", "Model alias to request from gateway")
-	flags.StringVar(&objective, "objective", "", "Custom objective prompt")
-	flags.StringVar(&outputDir, "output-dir", "./jagr-output", "Directory for reports")
-	flags.BoolVar(&verbose, "verbose", false, "Verbose local logging")
-	flags.StringVar(&hostname, "hostname", "", "Override hostname detection")
-	flags.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS certificate verification (trust self-signed certs)")
-	flags.IntVar(&httpTimeoutSec, "http-timeout", 120, "HTTP request timeout in seconds for gateway communication")
-	flags.IntVar(&commandTimeoutSec, "command-timeout", 300, "Default command execution timeout in seconds")
-	flags.IntVar(&longCommandTimeoutSec, "long-command-timeout", 900, "Long-running command execution timeout in seconds")
+	flags.StringVar(&gatewayURL, "gateway-url", "", "Gateway server URL (required) (env: JAGR_GATEWAY_URL)")
+	flags.StringVar(&apiKey, "api-key", "", "API key for gateway auth (env: JAGR_API_KEY)")
+	flags.StringVar(&mode, "mode", "interactive", "Execution mode: batch | interactive (env: JAGR_MODE)")
+	flags.IntVar(&maxIterations, "max-iterations", 50, "Maximum ReAct loop iterations (env: JAGR_MAX_ITERATIONS)")
+	flags.IntVar(&maxToolFailures, "max-tool-failures", 5, "Max consecutive failures per tool before circuit breaker trips (env: JAGR_MAX_TOOL_FAILURES)")
+	flags.StringVar(&model, "model", "default", "Model alias to request from gateway (env: JAGR_MODEL)")
+	flags.StringVar(&objective, "objective", "", "Custom objective prompt (env: JAGR_OBJECTIVE)")
+	flags.StringVar(&outputDir, "output-dir", "./jagr-output", "Directory for reports (env: JAGR_OUTPUT_DIR)")
+	flags.BoolVar(&verbose, "verbose", false, "Verbose local logging (env: JAGR_VERBOSE)")
+	flags.StringVar(&hostname, "hostname", "", "Override hostname detection (env: JAGR_HOSTNAME)")
+	flags.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS certificate verification (trust self-signed certs) (env: JAGR_TLS_SKIP_VERIFY)")
+	flags.IntVar(&httpTimeoutSec, "http-timeout", 120, "HTTP request timeout in seconds for gateway communication (env: JAGR_HTTP_TIMEOUT)")
+	flags.IntVar(&commandTimeoutSec, "command-timeout", 300, "Default command execution timeout in seconds (env: JAGR_COMMAND_TIMEOUT)")
+	flags.IntVar(&longCommandTimeoutSec, "long-command-timeout", 900, "Long-running command execution timeout in seconds (env: JAGR_LONG_COMMAND_TIMEOUT)")
+	flags.StringVar(&remoteHost, "remote", "", "Copy agent to remote host via SSH and execute there (env: JAGR_REMOTE)")
 
 	// Bind env vars
 	rootCmd.PreRun = func(cmd *cobra.Command, args []string) {
-		if !cmd.Flags().Changed("gateway-url") {
-			if v := os.Getenv("JAGR_GATEWAY_URL"); v != "" {
-				gatewayURL = v
-			}
-		}
-		if !cmd.Flags().Changed("api-key") {
-			if v := os.Getenv("JAGR_API_KEY"); v != "" {
-				apiKey = v
-			}
-		}
-		if !cmd.Flags().Changed("max-tool-failures") {
-			if v := os.Getenv("JAGR_MAX_TOOL_FAILURES"); v != "" {
-				if n, err := fmt.Sscanf(v, "%d", &maxToolFailures); n != 1 || err != nil {
-					fmt.Fprintf(os.Stderr, "warning: invalid JAGR_MAX_TOOL_FAILURES=%q, using default\n", v)
-				}
-			}
-		}
-		if !cmd.Flags().Changed("tls-skip-verify") {
-			if v := os.Getenv("JAGR_TLS_SKIP_VERIFY"); v == "1" || v == "true" {
-				tlsSkipVerify = true
-			}
-		}
+		bindStringEnv(cmd, "gateway-url", "JAGR_GATEWAY_URL", &gatewayURL)
+		bindStringEnv(cmd, "api-key", "JAGR_API_KEY", &apiKey)
+		bindStringEnv(cmd, "mode", "JAGR_MODE", &mode)
+		bindIntEnv(cmd, "max-iterations", "JAGR_MAX_ITERATIONS", &maxIterations)
+		bindIntEnv(cmd, "max-tool-failures", "JAGR_MAX_TOOL_FAILURES", &maxToolFailures)
+		bindStringEnv(cmd, "model", "JAGR_MODEL", &model)
+		bindStringEnv(cmd, "objective", "JAGR_OBJECTIVE", &objective)
+		bindStringEnv(cmd, "output-dir", "JAGR_OUTPUT_DIR", &outputDir)
+		bindBoolEnv(cmd, "verbose", "JAGR_VERBOSE", &verbose)
+		bindStringEnv(cmd, "hostname", "JAGR_HOSTNAME", &hostname)
+		bindBoolEnv(cmd, "tls-skip-verify", "JAGR_TLS_SKIP_VERIFY", &tlsSkipVerify)
+		bindIntEnv(cmd, "http-timeout", "JAGR_HTTP_TIMEOUT", &httpTimeoutSec)
+		bindIntEnv(cmd, "command-timeout", "JAGR_COMMAND_TIMEOUT", &commandTimeoutSec)
+		bindIntEnv(cmd, "long-command-timeout", "JAGR_LONG_COMMAND_TIMEOUT", &longCommandTimeoutSec)
+		bindStringEnv(cmd, "remote", "JAGR_REMOTE", &remoteHost)
 	}
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
+	}
+}
+
+// buildRemoteArgs reconstructs CLI flags from the current command, excluding --remote.
+func buildRemoteArgs(cmd *cobra.Command) []string {
+	var args []string
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if f.Name == "remote" {
+			return
+		}
+		args = append(args, fmt.Sprintf("--%s=%s", f.Name, f.Value.String()))
+	})
+	return args
+}
+
+func bindStringEnv(cmd *cobra.Command, flagName, envName string, target *string) {
+	if !cmd.Flags().Changed(flagName) {
+		if v := os.Getenv(envName); v != "" {
+			*target = v
+		}
+	}
+}
+
+func bindIntEnv(cmd *cobra.Command, flagName, envName string, target *int) {
+	if !cmd.Flags().Changed(flagName) {
+		if v := os.Getenv(envName); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+				*target = n
+			} else {
+				fmt.Fprintf(os.Stderr, "warning: invalid %s=%q, using default\n", envName, v)
+			}
+		}
+	}
+}
+
+func bindBoolEnv(cmd *cobra.Command, flagName, envName string, target *bool) {
+	if !cmd.Flags().Changed(flagName) {
+		if v := os.Getenv(envName); v != "" {
+			*target = (v == "true" || v == "1" || v == "yes")
+		}
 	}
 }

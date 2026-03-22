@@ -108,6 +108,7 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/health", g.healthHandler).Methods("GET")
 	router.HandleFunc("/v1/chat/completions", g.chatCompletionsHandler).Methods("POST")
 	router.HandleFunc("/v1/models", g.modelsHandler).Methods("GET")
+	router.HandleFunc("/v1/agent/config", g.agentConfigHandler).Methods("GET")
 
 	router.HandleFunc("/v1/heartbeat", g.heartbeatHandler).Methods("POST")
 	router.HandleFunc("/v1/sessions/close", g.closeSessionHandler).Methods("POST")
@@ -325,6 +326,18 @@ func (g *Gateway) modelsHandler(w http.ResponseWriter, r *http.Request) {
 		"object": "list",
 		"data":   modelList,
 	})
+}
+
+func (g *Gateway) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	g.log.Debug("Serving agent profile config", zap.String("hostname", agent.Hostname))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(g.config.Agents)
 }
 
 func (g *Gateway) sessionReaper() {

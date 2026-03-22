@@ -69,3 +69,20 @@ timeouts:
 logging:
   level: info
   audit: true
+
+agents:
+  # Examples of agent profile configurations
+  phase_UserAccess:
+    model: "fast"
+    temperature: 0.1
+    top_p: 0.95
+  phase_Persistence:
+    model: "default"
+    temperature: 0.1
+  investigator:
+    model: "default"
+    temperature: 0.2
+    top_k: 40
+  reporter:
+    model: "default"
+    temperature: 0.7

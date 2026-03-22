@@ -36,6 +36,14 @@ type Agent struct {
 	startTime        time.Time
 	concluded        bool
 	toolFailureCounts map[string]int
+	profiles          map[string]AgentProfile
+}
+
+type AgentProfile struct {
+	Model       string  `json:"model"`
+	Temperature float32 `json:"temperature"`
+	TopP        float32 `json:"top_p"`
+	TopK        int     `json:"top_k"`
 }
 
 type Message struct {
@@ -101,65 +109,91 @@ func (a *Agent) Run() error {
 		a.logger.Error("Failed to log init event", zap.Error(err))
 	}
 
-	// Start heartbeat goroutine — sends a heartbeat every 10s so the gateway
-	// knows this session is still alive.
+	a.fetchProfiles()
+
 	heartbeatDone := make(chan struct{})
 	go a.heartbeatLoop(heartbeatDone)
 	defer close(heartbeatDone)
-	// Close the session on the gateway when we exit
 	defer a.closeSession()
 
-	systemPrompt := a.buildSystemPrompt()
-	a.conversation = append(a.conversation, Message{Role: "system", Content: systemPrompt})
-
 	hostContext := a.collectHostContext()
-	a.conversation = append(a.conversation, Message{
-		Role:    "user",
-		Content: fmt.Sprintf("## Target Host Context\n\n%s\n\nBegin your investigation following the methodology in your instructions. Start with Phase 2: User & Access Audit.", hostContext),
-	})
 
-	for a.iterations < a.maxIter {
-		a.logger.Info("Thinking", zap.Int("iteration", a.iterations+1), zap.Int("max", a.maxIter))
+	phases := []string{
+		"UserAccess",
+		"Persistence",
+		"Network",
+		"Filesystem",
+		"LogAnalysis",
+	}
 
-		toolCalls, err := a.think()
+	for _, p := range phases {
+		a.logger.Info("Starting Phase", zap.String("phase", p))
+		objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nBegin your investigation phase.", hostContext)
+		
+		role := "phase_" + p
+		prompt, err := GetPrompt(role, map[string]interface{}{})
 		if err != nil {
-			return fmt.Errorf("thinking failed: %w", err)
+			a.logger.Error("Failed to load prompt template", zap.Error(err))
+			continue
 		}
 
-		if a.concluded {
-			return nil
-		}
-
-		for _, tc := range toolCalls {
-			a.logger.Info("Tool call", zap.String("tool", tc.Function.Name))
-		}
-
-		// Interactive mode: present proposed actions and wait for approval
-		if a.mode == "interactive" {
-			if approved, hint := a.promptOperator(toolCalls); !approved {
-				if hint != "" {
-					a.conversation = append(a.conversation, Message{Role: "user", Content: hint})
-				}
-				continue
-			}
-		}
-
-		results, err := a.act(toolCalls)
-		if err != nil {
-			return fmt.Errorf("action failed: %w", err)
-		}
-
-		if err := a.observe(results); err != nil {
-			return fmt.Errorf("observation failed: %w", err)
-		}
-
-		if a.concluded {
-			return nil
+		agent := NewSubAgent(a, role, prompt, objective, GetToolsForRole(role))
+		if err := agent.Run(); err != nil {
+			a.logger.Error("Phase agent failed", zap.String("phase", p), zap.Error(err))
 		}
 	}
 
-	a.logger.Info("Max iterations reached, concluding")
-	return a.conclude("Maximum iterations reached")
+	// Reporter Agent
+	a.logger.Info("Starting Reporter Agent")
+	findingsJson, _ := json.MarshalIndent(a.findings, "", "  ")
+	reportPath := filepath.Join(a.outputDir, "report.md")
+	reporterObjective := fmt.Sprintf("Synthesize these findings into a detailed markdown report.\nWrite the final report to exactly this path: %s\n\nFindings:\n%s", reportPath, string(findingsJson))
+	reporterPrompt, _ := GetPrompt("reporter", nil)
+	reporterAgent := NewSubAgent(a, "reporter", reporterPrompt, reporterObjective, GetToolsForRole("reporter"))
+	if err := reporterAgent.Run(); err != nil {
+		a.logger.Error("Reporter agent failed", zap.Error(err))
+	}
+
+	a.generateReports("Multi-agent architecture concluded")
+
+	return nil
+}
+
+func (a *Agent) runInvestigator(target, contextStr string) error {
+	objective := fmt.Sprintf("Analyze target: %s\nContext: %s", target, contextStr)
+	prompt, _ := GetPrompt("investigator", nil)
+	investigator := NewSubAgent(a, "investigator", prompt, objective, GetToolsForRole("investigator"))
+	return investigator.Run()
+}
+
+func (a *Agent) fetchProfiles() {
+	req, err := http.NewRequest("GET", a.gatewayURL+"/v1/agent/config", nil)
+	if err != nil {
+		a.logger.Debug("Failed to create profile fetch request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Debug("Failed to fetch agent profiles", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	var profiles map[string]AgentProfile
+	if err := json.NewDecoder(resp.Body).Decode(&profiles); err == nil {
+		if a.profiles == nil {
+			a.profiles = make(map[string]AgentProfile)
+		}
+		for k, v := range profiles {
+			a.profiles[k] = v
+		}
+		a.logger.Info("Loaded agent profiles from gateway", zap.Int("count", len(a.profiles)))
+	} else {
+		a.logger.Debug("Failed to decode agent profiles", zap.Error(err))
+	}
 }
 
 // heartbeatLoop sends periodic heartbeats to the gateway every 10 seconds.
@@ -292,378 +326,7 @@ func (a *Agent) collectHostContext() string {
 	return strings.Join(sections, "\n\n")
 }
 
-func (a *Agent) buildSystemPrompt() string {
-	return `You are Jagr, an autonomous security engineer conducting a defensive security audit
-of a Linux system in a cybersecurity exercise environment. You are running as root on
-the target host. Your goal is to identify security issues, misconfigurations,
-indicators of compromise, backdoors, and persistence mechanisms.
 
-## Your Environment
-
-You operate inside a "Clean Room" — a trusted execution environment extracted to a
-RAM-backed directory. All commands you execute run through trusted BusyBox binaries
-with a sanitized environment. The host system may be compromised, so you must never
-trust host binaries outside the Clean Room.
-
-You communicate with a gateway server that provides your intelligence. Exercise
-documentation (network maps, system manuals, baseline configs) is available via the
-query_knowledge_base tool.
-
-## Investigation Methodology
-
-Follow this structured approach. You may deviate when findings warrant deeper
-investigation, but always return to the methodology.
-
-### Phase 1: Situational Awareness (already completed)
-Host context has been provided to you. Review it before proceeding.
-
-### Phase 2: User & Access Audit
-- Enumerate all user accounts (/etc/passwd), focusing on UID 0 accounts, users with
-  shells, and recently created accounts
-- Check /etc/shadow for accounts without passwords or with suspicious hashes
-- Review /etc/sudoers and /etc/sudoers.d/ for overly permissive rules
-- Check SSH authorized_keys for all users, especially root
-- Review /etc/group for unexpected group memberships
-
-### Phase 3: Persistence Mechanisms
-- Check all cron locations: /etc/crontab, /etc/cron.d/, /etc/cron.{hourly,daily,weekly,monthly},
-  and per-user crontabs (crontab -l for each user)
-- Review systemd units: look for unusual .service, .timer files in /etc/systemd/system/
-  and /lib/systemd/system/
-- Check init scripts in /etc/init.d/
-- Examine /etc/rc.local and /etc/profile.d/
-- Review shell profiles: /etc/bash.bashrc, ~/.bashrc, ~/.profile, ~/.bash_profile
-  for all users with shells
-- Check /etc/ld.so.preload for LD_PRELOAD persistence
-
-### Phase 4: Process & Network Analysis
-- Examine running processes, look for suspicious parents, unusual binaries,
-  processes running from /tmp or /dev/shm
-- Start pspy for at least 120 seconds to catch scheduled tasks
-- Review listening ports and active connections
-- Look for unexpected outbound connections, especially to non-standard ports
-- Check iptables/nftables rules for unusual NAT or forwarding rules
-
-### Phase 5: Filesystem Analysis
-- Search for recently modified files: find / -mtime -7 -type f (focus on
-  /etc, /usr, /var, /root, /home)
-- Look for hidden files and directories in unusual locations (/var, /tmp, /dev/shm, /opt)
-- Check for SUID/SGID binaries and compare against expected set
-- Look for world-writable files in sensitive locations
-- Check /tmp, /var/tmp, /dev/shm for suspicious files
-
-### Phase 6: Log Analysis
-- Review auth logs (/var/log/auth.log or /var/log/secure) for brute force,
-  successful logins from unexpected sources, privilege escalation
-- Check syslog/journal for unusual service starts, crashes, or errors
-- Look for log tampering: gaps in timestamps, truncated files, cleared logs
-
-### Phase 7: Advanced Checks (if warranted by earlier findings)
-- Run LinPEAS for comprehensive privilege escalation checks
-- Check for kernel modules (lsmod), compare against expected modules
-- Review /etc/hosts for DNS hijacking
-- Check for container escapes if running in a containerized environment
-- Investigate any anomalies found in earlier phases
-
-### Comprehensive Enumeration Checklist
-
-Use this checklist throughout your investigation to ensure thorough coverage.
-
-#### System Information
-- Get OS information
-- Check the PATH — any writable folder?
-- Check env variables — any sensitive detail?
-- Search for kernel exploits using scripts (DirtyCow?)
-- Check if the sudo version is vulnerable
-- Dmesg signature verification failed
-- More system enum (date, system stats, cpu info, printers)
-- Enumerate more defenses
-
-#### Drives
-- List mounted drives
-- Any unmounted drive?
-- Any creds in fstab?
-
-#### Installed Software
-- Check for useful software installed
-- Check for vulnerable software installed
-
-#### Processes
-- Is any unknown software running?
-- Is any software running with more privileges than it should have?
-- Search for exploits of running processes (especially the version running)
-- Can you modify the binary of any running process?
-- Monitor processes and check if any interesting process is running frequently
-- Can you read some interesting process memory (where passwords could be saved)?
-
-#### Scheduled/Cron Jobs
-- Is the PATH being modified by some cron and you can write in it?
-- Any wildcard in a cron job?
-- Some modifiable script is being executed or is inside modifiable folder?
-- Have you detected that some script could be or is being executed very frequently?
-  (every 1, 2 or 5 minutes)
-
-#### Services
-- Any writable .service file?
-- Any writable binary executed by a service?
-- Any writable folder in systemd PATH?
-- Any writable systemd unit drop-in in /etc/systemd/system/<unit>.d/*.conf that can
-  override ExecStart/User?
-
-#### Timers
-- Any writable timer?
-
-#### Sockets
-- Any writable .socket file?
-- Can you communicate with any socket?
-- HTTP sockets with interesting info?
-
-#### D-Bus
-- Can you communicate with any D-Bus?
-
-#### Network
-- Enumerate the network to know where you are
-- Open ports you couldn't access before getting a shell inside the machine?
-- Can you sniff traffic using tcpdump?
-
-#### Users
-- Generic users/groups enumeration
-- Do you have a very big UID? Is the machine vulnerable?
-- Can you escalate privileges thanks to a group you belong to?
-- Clipboard data?
-- Password Policy?
-- Try to use every known password that you have discovered previously to login with
-  each possible user. Try to login also without a password.
-
-#### Writable PATH
-- If you have write privileges over some folder in PATH you may be able to escalate
-  privileges
-
-#### SUDO and SUID Commands
-- Can you execute any command with sudo? Can you use it to READ, WRITE or EXECUTE
-  anything as root? (GTFOBins)
-- If sudo -l allows sudoedit, check for sudoedit argument injection
-  (CVE-2023-22809) via SUDO_EDITOR/VISUAL/EDITOR to edit arbitrary files on
-  vulnerable versions (sudo -V < 1.9.12p2).
-  Example: SUDO_EDITOR="vim -- /etc/sudoers" sudoedit /etc/hosts
-- Is any exploitable SUID binary? (GTFOBins)
-- Are sudo commands limited by path? Can you bypass the restrictions?
-- Sudo/SUID binary without path indicated?
-- SUID binary specifying path? Bypass
-- LD_PRELOAD vuln
-- Lack of .so library in SUID binary from a writable folder?
-- SUDO tokens available? Can you create a SUDO token?
-- Can you read or modify sudoers files?
-- Can you modify /etc/ld.so.conf.d/?
-- OpenBSD DOAS command
-
-#### Capabilities
-- Has any binary any unexpected capability?
-
-#### ACLs
-- Has any file any unexpected ACL?
-
-#### Open Shell Sessions
-- screen
-- tmux
-
-#### SSH
-- Debian OpenSSL Predictable PRNG — CVE-2008-0166
-- SSH Interesting configuration values
-
-#### Interesting Files
-- Profile files — Read sensitive data? Write to privesc?
-- passwd/shadow files — Read sensitive data? Write to privesc?
-- Check commonly interesting folders for sensitive data
-- Weird Location/Owned files, you may have access to or alter executable files
-- Modified in last mins
-- Sqlite DB files
-- Hidden files
-- Script/Binaries in PATH
-- Web files (passwords?)
-- Backups?
-- Known files that contains passwords: Use LinPEAS and LaZagne
-- Generic search
-
-#### Writable Files
-- Modify python library to execute arbitrary commands?
-- Can you modify log files? Logtotten exploit
-- Can you modify /etc/sysconfig/network-scripts/? Centos/Redhat exploit
-- Can you write in ini, int.d, systemd or rc.d files?
-
-#### Other Tricks
-- Can you abuse NFS to escalate privileges?
-- Do you need to escape from a restrictive shell?
-
-## Available Tools
-` + a.formatToolsForPrompt() + `
-
-## Rules
-
-1. NEVER run LinPEAS first. Do manual investigation first (Phases 2-6). LinPEAS
-   is a supplement in Phase 7, not a replacement for manual analysis.
-2. Submit findings as you discover them via submit_finding. Do not accumulate
-   findings and submit at the end.
-3. For each finding, provide: what you found, why it is a security issue, the
-   evidence (exact file content or command output), and MITRE ATT&CK technique ID
-   if applicable.
-4. Classify severity accurately:
-   - critical: active backdoor, reverse shell, rootkit, credential theft
-   - high: persistence mechanism, privilege escalation vector, unauthorized access
-   - medium: misconfiguration that could enable escalation, weak permissions
-   - low: informational security hardening recommendations
-   - info: observations that provide context but are not issues
-5. If you find something suspicious, investigate deeper before concluding. Follow
-   the trail: a suspicious cron job might point to a dropped binary, which might
-   point to a C2 channel.
-6. When output is large, use head/tail/grep to focus on relevant sections rather
-   than reading everything.
-7. Do not modify the target system. You are investigating, not remediating.
-8. Use query_knowledge_base when you encounter unfamiliar services, need to verify
-   expected configurations, or want to understand the network topology.
-9. Set your confidence level honestly. If you are uncertain whether something is
-   malicious or legitimate, say so and explain your reasoning.
-10. When you have completed all phases and followed up on all leads, call conclude
-    with a summary of your findings.`
-}
-
-func (a *Agent) formatToolsForPrompt() string {
-	var tools []string
-	for _, tool := range GetAvailableTools() {
-		tools = append(tools, fmt.Sprintf("- %s: %s", tool.Name, tool.Description))
-	}
-	return strings.Join(tools, "\n")
-}
-
-func (a *Agent) think() ([]ToolCall, error) {
-	a.iterations++
-
-	// Build request body manually
-	messages := make([]map[string]string, len(a.conversation))
-	for i, m := range a.conversation {
-		messages[i] = map[string]string{
-			"role":    m.Role,
-			"content": m.Content,
-		}
-	}
-
-	tools := make([]map[string]any, 0)
-	for _, t := range GetAvailableTools() {
-		tools = append(tools, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        t.Name,
-				"description": t.Description,
-			},
-		})
-	}
-
-	reqBody := map[string]any{
-		"model":    a.model,
-		"messages": messages,
-		"tools":    tools,
-	}
-
-	reqBytes, _ := json.Marshal(reqBody)
-
-	// Call gateway
-	req, _ := http.NewRequest("POST", a.gatewayURL+"/v1/chat/completions", strings.NewReader(string(reqBytes)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	req.Header.Set("X-Hostname", a.hostname())
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("gateway request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var reply map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	// Track token usage
-	if usage, ok := reply["usage"].(map[string]any); ok {
-		if promptTokens, ok := usage["prompt_tokens"].(float64); ok {
-			a.totalTokensIn += int(promptTokens)
-		}
-		if completionTokens, ok := usage["completion_tokens"].(float64); ok {
-			a.totalTokensOut += int(completionTokens)
-		}
-	}
-
-	if choices, ok := reply["choices"].([]any); ok && len(choices) > 0 {
-		choice, _ := choices[0].(map[string]any)
-		if msg, ok := choice["message"].(map[string]any); ok {
-			content, _ := msg["content"].(string)
-			a.conversation = append(a.conversation, Message{
-				Role:    "assistant",
-				Content: content,
-			})
-
-			if toolCalls, ok := msg["tool_calls"].([]any); ok {
-				var result []ToolCall
-				for _, tc := range toolCalls {
-					if tcMap, ok := tc.(map[string]any); ok {
-						result = append(result, ToolCall{
-							ID:   tcMap["id"].(string),
-							Type: tcMap["type"].(string),
-							Function: Function{
-								Name:      tcMap["function"].(map[string]any)["name"].(string),
-								Arguments: tcMap["function"].(map[string]any)["arguments"].(string),
-							},
-						})
-					}
-				}
-				return result, nil
-			}
-
-			// No tool calls — LLM wants to finish without calling conclude
-			if content != "" {
-				a.logger.Info("LLM responded without tool calls, concluding")
-				a.concluded = true
-				a.conclude(content)
-				return nil, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no tool calls in response")
-}
-
-func (a *Agent) act(toolCalls []ToolCall) ([]ToolResult, error) {
-	var results []ToolResult
-
-	for _, tc := range toolCalls {
-		result, err := a.executeTool(tc)
-		if err != nil {
-			a.toolFailureCounts[tc.Function.Name]++
-			count := a.toolFailureCounts[tc.Function.Name]
-			a.logger.Warn("Tool call failed",
-				zap.String("tool", tc.Function.Name),
-				zap.Int("consecutive_failures", count),
-				zap.Int("max_failures", a.maxToolFailures),
-				zap.Error(err))
-
-			if count >= a.maxToolFailures {
-				return nil, fmt.Errorf("circuit breaker: tool %q failed %d consecutive times, aborting", tc.Function.Name, count)
-			}
-
-			results = append(results, ToolResult{
-				ToolID:  tc.ID,
-				Name:    tc.Function.Name,
-				Content: fmt.Sprintf("Error: %v", err),
-				IsError: true,
-			})
-		} else {
-			a.toolFailureCounts[tc.Function.Name] = 0
-			results = append(results, result)
-		}
-	}
-
-	return results, nil
-}
 
 func (a *Agent) executeTool(tc ToolCall) (ToolResult, error) {
 	args, err := ParseToolArguments(tc.Function.Arguments)
@@ -696,8 +359,6 @@ func (a *Agent) executeTool(tc ToolCall) (ToolResult, error) {
 		return a.execGetNetworkInfo(tc, args)
 	case "submit_finding":
 		return a.execSubmitFinding(tc, args)
-	case "conclude":
-		return a.execConclude(tc, args)
 	default:
 		return ToolResult{}, fmt.Errorf("unknown tool: %s", tc.Function.Name)
 	}
@@ -980,58 +641,6 @@ func (a *Agent) execSubmitFinding(tc ToolCall, args map[string]any) (ToolResult,
 	}, nil
 }
 
-func (a *Agent) execConclude(tc ToolCall, args map[string]any) (ToolResult, error) {
-	summary, _ := args["summary"].(string)
-	if summary == "" {
-		summary = "Investigation complete"
-	}
-
-	a.concluded = true
-	a.conclude(summary)
-
-	return ToolResult{
-		ToolID:  tc.ID,
-		Name:    tc.Function.Name,
-		Content: summary,
-	}, nil
-}
-
-func (a *Agent) observe(results []ToolResult) error {
-	for _, result := range results {
-		a.conversation = append(a.conversation, Message{
-			Role:    "tool",
-			Content: result.Content,
-			Name:    result.Name,
-		})
-
-		if err := a.logEvent("tool_result", map[string]any{
-			"tool":      result.Name,
-			"content":   result.Content,
-			"exit_code": result.ExitCode,
-		}); err != nil {
-			a.logger.Error("Failed to log tool result", zap.Error(err))
-		}
-
-		if result.IsError {
-			a.logger.Error("Tool execution error", zap.String("tool", result.Name))
-		}
-	}
-
-	return nil
-}
-
-func (a *Agent) conclude(summary string) error {
-	if err := a.logEvent("conclude", map[string]any{"summary": summary}); err != nil {
-		a.logger.Error("Failed to log conclude event", zap.Error(err))
-	}
-
-	a.logger.Info("Investigation complete",
-		zap.Int("iterations", a.iterations),
-		zap.Int("findings", len(a.findings)))
-
-	return a.generateReports(summary)
-}
-
 func (a *Agent) generateReports(summary string) error {
 	report := Report{
 		Metadata: ReportMetadata{
@@ -1052,12 +661,6 @@ func (a *Agent) generateReports(summary string) error {
 
 	ocsfPath := filepath.Join(a.outputDir, "findings.json")
 	if err := saveJSON(ocsfPath, report); err != nil {
-		return err
-	}
-
-	markdown := a.generateMarkdownReport(report)
-	markdownPath := filepath.Join(a.outputDir, "report.md")
-	if err := os.WriteFile(markdownPath, []byte(markdown), 0644); err != nil {
 		return err
 	}
 

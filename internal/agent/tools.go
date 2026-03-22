@@ -226,7 +226,65 @@ func GetAvailableTools() []Tool {
 				"required": []string{"summary"},
 			},
 		},
+		{
+			Name:        "delegate_investigation",
+			Description: "Spawn an Investigator Agent to drill deeply into a specific suspicious file, process, or configuration.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target": map[string]any{
+						"type":        "string",
+						"description": "The target to investigate (e.g. /etc/crontab, PID 1234)",
+					},
+					"context": map[string]any{
+						"type":        "string",
+						"description": "Why this target is suspicious and what the Investigator should look for",
+					},
+				},
+				"required": []string{"target", "context"},
+			},
+		},
 	}
+}
+
+// GetToolsForRole filters the available tools based on the SubAgent's role
+func GetToolsForRole(role string) []Tool {
+	allTools := GetAvailableTools()
+	
+	switch role {
+	case "reporter":
+		// Reporter only needs file reading/writing and conclude
+		return filterTools(allTools, []string{"read_file", "write_file", "conclude"})
+	case "investigator":
+		// Investigator does the deep dive, needs full access but not delegation
+		return filterTools(allTools, []string{
+			"execute_trusted", "read_file", "write_file", "get_system_env", 
+			"run_linpeas_sh", "run_linpeas_static", "run_pspy", "list_dir", 
+			"search_files", "get_network_info", "submit_finding", "conclude",
+		})
+	default:
+		// Phase Agents do broad searches, can delegate investigations
+		return filterTools(allTools, []string{
+			"execute_trusted", "read_file", "write_file", "get_system_env", 
+			"run_linpeas_sh", "run_linpeas_static", "run_pspy", "list_dir", 
+			"search_files", "get_network_info", "delegate_investigation", "conclude",
+		})
+	}
+}
+
+func filterTools(tools []Tool, allowed []string) []Tool {
+	var filtered []Tool
+	allowSet := make(map[string]bool)
+	for _, a := range allowed {
+		allowSet[a] = true
+	}
+	
+	for _, t := range tools {
+		if allowSet[t.Name] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }
 
 // ParseToolArguments parses JSON arguments for a tool

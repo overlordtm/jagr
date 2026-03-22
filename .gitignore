@@ -45,6 +45,19 @@ go.work
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,go
 
+### Vagrant ###
+# General
+.vagrant/
+
+# Log files (if you are creating logs in debug mode, uncomment this)
+# *.log
+
+### Vagrant Patch ###
+*.box
+
+# End of https://www.toptal.com/developers/gitignore/api/vagrant
+
+
 ### Custom ###
 
 # testing config
@@ -57,6 +70,10 @@ jagr-server
 
 # jagr output from testing
 jagr-output/
+
+# environment variables
+.env
+.env.local
 
 # web frontend
 web/node_modules/

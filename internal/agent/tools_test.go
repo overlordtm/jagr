@@ -20,6 +20,7 @@ func TestGetAvailableTools(t *testing.T) {
 		"search_files",
 		"get_network_info",
 		"submit_finding",
+		"delegate_investigation",
 		"conclude",
 	}
 	

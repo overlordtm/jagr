@@ -1,0 +1,40 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "agent",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "go",
+            "args": [
+                "run",
+                "./cmd/agent",
+                "--gateway-url",
+                "http://localhost:8443",
+                "--api-key",
+                "test",
+                "--mode",
+                "batch",
+                "--tls-skip-verify"
+            ]
+        },
+        {
+            "label": "gateway",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "go",
+            "args": [
+                "run",
+                "./cmd/gateway",
+                "--config",
+                "gateway.yaml"
+            ]
+        }
+    ]
+}

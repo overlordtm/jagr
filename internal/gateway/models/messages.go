@@ -25,6 +25,9 @@ type ChatCompletionRequest struct {
 	Tools    []Tool    `json:"tools,omitempty"`
 	ToolChoice interface{} `json:"tool_choice,omitempty"`
 	Stream   bool      `json:"stream,omitempty"`
+	Temperature float32 `json:"temperature,omitempty"`
+	TopP        float32 `json:"top_p,omitempty"`
+	TopK        int     `json:"top_k,omitempty"`
 }
 
 type Tool struct {

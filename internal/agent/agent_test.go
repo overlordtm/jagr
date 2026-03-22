@@ -22,25 +22,6 @@ func TestAgent_Hostname(t *testing.T) {
 	}
 }
 
-func TestAgent_BuildSystemPrompt(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	agent := &Agent{
-		logger: logger,
-	}
-	
-	prompt := agent.buildSystemPrompt()
-	
-	if !strings.Contains(prompt, "JAGR") {
-		t.Error("Expected prompt to contain JAGR")
-	}
-	if !strings.Contains(prompt, "security auditor") {
-		t.Error("Expected prompt to contain 'security auditor'")
-	}
-	if !strings.Contains(prompt, "Available Tools") {
-		t.Error("Expected prompt to contain 'Available Tools'")
-	}
-}
-
 func TestAgent_BuildSummary(t *testing.T) {
 	agent := &Agent{
 		findings: []Finding{
@@ -262,32 +243,6 @@ func TestAgent_GetSystemEnv(t *testing.T) {
 	
 	if err != nil {
 		t.Logf("Expected permission denied error in test environment: %v", err)
-	}
-}
-
-func TestAgent_Conclude(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	agent := &Agent{
-		logger: logger,
-	}
-	
-	tc := ToolCall{
-		Function: Function{
-			Name: "conclude",
-		},
-	}
-	
-	args := map[string]any{
-		"summary": "Test summary",
-	}
-	
-	result, err := agent.execConclude(tc, args)
-	
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
-	if !strings.Contains(result.Content, "Test summary") {
-		t.Errorf("Expected content to contain 'Test summary', got %s", result.Content)
 	}
 }
 
