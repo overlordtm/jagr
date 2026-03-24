@@ -195,12 +195,12 @@ func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
 }
 
 func (s *Store) CloseSession(sessionID string) error {
-	_, err := s.db.Exec(`UPDATE sessions SET status = 'completed' WHERE id = ?`, sessionID)
+	_, err := s.db.Exec(`UPDATE sessions SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessionID)
 	return err
 }
 
 func (s *Store) CloseSessionWithError(sessionID, errMsg string) error {
-	_, err := s.db.Exec(`UPDATE sessions SET status = 'error', error = ? WHERE id = ?`, errMsg, sessionID)
+	_, err := s.db.Exec(`UPDATE sessions SET status = 'error', error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, errMsg, sessionID)
 	return err
 }
 
@@ -286,6 +286,11 @@ func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, 
 		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, sub_agent_role)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, costUSD, latencyMs, msg.SubAgentRole)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessID)
 	return err
 }
 

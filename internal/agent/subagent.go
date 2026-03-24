@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -215,25 +216,38 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 
 	reqBytes, _ := json.Marshal(reqBody)
 
-	req, _ := http.NewRequest("POST", sa.parent.gatewayURL+"/v1/chat/completions", strings.NewReader(string(reqBytes)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+sa.parent.apiKey)
-	req.Header.Set("X-Hostname", sa.parent.hostname())
-	req.Header.Set("X-Sub-Agent-Role", sa.role)
-
-	resp, err := sa.parent.doGatewayRequest(req, reqBytes)
+	reply, err := sa.doThinkRequest(reqBytes)
 	if err != nil {
-		return nil, fmt.Errorf("gateway request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gateway returned unexpected status %d", resp.StatusCode)
-	}
-
-	var reply map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		// If the error looks like a context-length overflow, try compacting and retrying once.
+		if strings.Contains(err.Error(), "context length") || strings.Contains(err.Error(), "maximum context") {
+			sa.parent.logger.Warn("Context length exceeded, attempting compaction before retry", zap.String("role", sa.role))
+			if compactErr := sa.compactHistory(); compactErr != nil {
+				return nil, fmt.Errorf("context overflow and compaction failed: %w (original: %v)", compactErr, err)
+			}
+			// Rebuild messages from compacted conversation and retry
+			messages = make([]map[string]any, len(sa.conversation))
+			for i, m := range sa.conversation {
+				msg := map[string]any{
+					"role":    m.Role,
+					"content": m.Content,
+				}
+				if len(m.ToolCalls) > 0 {
+					msg["tool_calls"] = m.ToolCalls
+				}
+				if m.ToolCallID != "" {
+					msg["tool_call_id"] = m.ToolCallID
+				}
+				messages[i] = msg
+			}
+			reqBody["messages"] = messages
+			reqBytes, _ = json.Marshal(reqBody)
+			reply, err = sa.doThinkRequest(reqBytes)
+			if err != nil {
+				return nil, fmt.Errorf("gateway request failed after compaction: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("gateway request failed: %w", err)
+		}
 	}
 
 	if usage, ok := reply["usage"].(map[string]any); ok {
@@ -296,23 +310,72 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 	return nil, fmt.Errorf("no tool calls in response")
 }
 
-func (sa *SubAgent) needsCompaction() bool {
+func (sa *SubAgent) doThinkRequest(reqBytes []byte) (map[string]any, error) {
+	req, _ := http.NewRequest("POST", sa.parent.gatewayURL+"/v1/chat/completions", strings.NewReader(string(reqBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sa.parent.apiKey)
+	req.Header.Set("X-Hostname", sa.parent.hostname())
+	req.Header.Set("X-Sub-Agent-Role", sa.role)
+
+	resp, err := sa.parent.doGatewayRequest(req, reqBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var reply map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return reply, nil
+}
+
+func (sa *SubAgent) estimateTokens() int {
+	total := 0
+	for _, m := range sa.conversation {
+		// Rough estimate: ~4 chars per token
+		total += len(m.Content) / 4
+		for _, tc := range m.ToolCalls {
+			total += len(tc.Function.Arguments) / 4
+		}
+	}
+	return total
+}
+
+func (sa *SubAgent) getMaxContext() int {
 	sa.parent.mu.Lock()
-	maxContext := 0
+	defer sa.parent.mu.Unlock()
 	model := sa.parent.model
 	if profile, hasProfile := sa.parent.profiles[sa.role]; hasProfile && profile.Model != "" {
 		model = profile.Model
 	}
 	if ctx, ok := sa.parent.modelsContextWindow[model]; ok {
-		maxContext = ctx
+		return ctx
 	}
-	sa.parent.mu.Unlock()
+	return 0
+}
 
+func (sa *SubAgent) needsCompaction() bool {
+	maxContext := sa.getMaxContext()
 	if maxContext == 0 {
 		return false
 	}
 
-	return sa.lastPromptTokens > int(float64(maxContext)*0.8)
+	threshold := int(float64(maxContext) * 0.8)
+
+	// Check both the last known prompt token count AND a rough estimate
+	// of the current conversation size. Tool results can add massive
+	// amounts of text between iterations, making lastPromptTokens stale.
+	if sa.lastPromptTokens > threshold {
+		return true
+	}
+
+	return sa.estimateTokens() > threshold
 }
 
 func (sa *SubAgent) compactHistory() error {
