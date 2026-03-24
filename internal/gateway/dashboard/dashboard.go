@@ -86,10 +86,24 @@ func init() {
 			}
 		},
 		"statusColor": func(status string) string {
-			if status == "active" {
+			switch status {
+			case "active":
 				return "bg-emerald-500/20 text-emerald-400"
+			case "completed":
+				return "bg-sky-500/20 text-sky-400"
+			case "error":
+				return "bg-red-500/20 text-red-400"
+			case "valid":
+				return "bg-green-500/20 text-green-400"
+			case "invalid":
+				return "bg-red-500/20 text-red-400"
+			case "duplicate":
+				return "bg-yellow-500/20 text-yellow-400"
+			case "preliminary":
+				return "bg-gray-500/20 text-gray-400"
+			default:
+				return "bg-gray-500/20 text-gray-500"
 			}
-			return "bg-gray-500/20 text-gray-500"
 		},
 		"isLong": func(s string) bool {
 			return len(s) > 500
@@ -225,6 +239,23 @@ func init() {
 				}
 				g.Messages = append(g.Messages, m)
 			}
+			// Detect whether each agent concluded normally by checking the
+			// last assistant message: either it called the "conclude" tool,
+			// or it responded with content but no tool calls (LLM chose to stop).
+			for _, g := range byRole {
+				for i := len(g.Messages) - 1; i >= 0; i-- {
+					m := g.Messages[i]
+					if m.Role != "assistant" {
+						continue
+					}
+					if strings.Contains(m.ToolCalls, `"conclude"`) {
+						g.Concluded = true
+					} else if m.Content != "" && (m.ToolCalls == "" || m.ToolCalls == "null" || m.ToolCalls == "[]") {
+						g.Concluded = true
+					}
+					break
+				}
+			}
 			groups := make([]messageGroup, 0, len(order))
 			for _, role := range order {
 				groups = append(groups, *byRole[role])
@@ -238,6 +269,7 @@ func init() {
 type messageGroup struct {
 	AgentRole string
 	Messages  []models.MessageLog
+	Concluded bool // true if the subagent concluded normally (called conclude tool or responded without tool calls)
 }
 
 type parsedToolCall struct {
@@ -418,14 +450,16 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 
 	findingCount, _ := d.store.GetSessionFindingCount(sessionID)
 	hasReport, _ := d.store.HasReport(sessionID)
+	upstreamModel, _ := d.store.GetSessionUpstreamModel(sessionID)
 
 	d.render(w, "layout", map[string]any{
-		"Page":         "session",
-		"Agent":        agent,
-		"Session":      session,
-		"Duration":     duration,
-		"FindingCount": findingCount,
-		"HasReport":    hasReport,
+		"Page":          "session",
+		"Agent":         agent,
+		"Session":       session,
+		"Duration":      duration,
+		"FindingCount":  findingCount,
+		"HasReport":     hasReport,
+		"UpstreamModel": upstreamModel,
 	})
 }
 

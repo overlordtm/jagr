@@ -146,8 +146,8 @@ func (s *Store) CreateSession(agentID string) (*models.Session, error) {
 
 func (s *Store) GetSession(sessionID string) (*models.Session, error) {
 	var sess models.Session
-	err := s.db.QueryRow(`SELECT id, agent_id, created_at, updated_at, status, last_heartbeat FROM sessions WHERE id = ?`, sessionID).Scan(
-		&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status, &sess.LastHeartbeat,
+	err := s.db.QueryRow(`SELECT id, agent_id, created_at, updated_at, status, last_heartbeat, error FROM sessions WHERE id = ?`, sessionID).Scan(
+		&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status, &sess.LastHeartbeat, &sess.Error,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -161,9 +161,9 @@ func (s *Store) GetSession(sessionID string) (*models.Session, error) {
 func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
 	var sess models.Session
 	err := s.db.QueryRow(`
-		SELECT id, agent_id, created_at, updated_at, status, last_heartbeat FROM sessions
+		SELECT id, agent_id, created_at, updated_at, status, last_heartbeat, error FROM sessions
 		WHERE agent_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1
-	`, agentID).Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status, &sess.LastHeartbeat)
+	`, agentID).Scan(&sess.ID, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt, &sess.Status, &sess.LastHeartbeat, &sess.Error)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
@@ -175,7 +175,7 @@ func (s *Store) GetSessionForAgent(agentID string) (*models.Session, error) {
 
 func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
 	rows, err := s.db.Query(`
-		SELECT id, agent_id, created_at, updated_at, status, last_heartbeat FROM sessions WHERE agent_id = ?
+		SELECT id, agent_id, created_at, updated_at, status, last_heartbeat, error FROM sessions WHERE agent_id = ?
 	`, agentID)
 	if err != nil {
 		return nil, err
@@ -185,7 +185,7 @@ func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
 	var sessions []models.Session
 	for rows.Next() {
 		var s models.Session
-		err := rows.Scan(&s.ID, &s.AgentID, &s.CreatedAt, &s.UpdatedAt, &s.Status, &s.LastHeartbeat)
+		err := rows.Scan(&s.ID, &s.AgentID, &s.CreatedAt, &s.UpdatedAt, &s.Status, &s.LastHeartbeat, &s.Error)
 		if err != nil {
 			return nil, err
 		}
@@ -195,7 +195,12 @@ func (s *Store) GetSessions(agentID string) ([]models.Session, error) {
 }
 
 func (s *Store) CloseSession(sessionID string) error {
-	_, err := s.db.Exec(`UPDATE sessions SET status = 'closed' WHERE id = ?`, sessionID)
+	_, err := s.db.Exec(`UPDATE sessions SET status = 'completed' WHERE id = ?`, sessionID)
+	return err
+}
+
+func (s *Store) CloseSessionWithError(sessionID, errMsg string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET status = 'error', error = ? WHERE id = ?`, errMsg, sessionID)
 	return err
 }
 
@@ -462,16 +467,27 @@ func (s *Store) GetSessionCost(sessionID string) (float64, error) {
 // --- Findings ---
 
 func (s *Store) AddFinding(sessionID string, f *models.SessionFinding) error {
+	status := f.Status
+	if status == "" {
+		status = "preliminary"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO session_findings (session_id, finding_id, type, severity, observable, analysis, evidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, sessionID, f.FindingID, f.Type, f.Severity, f.Observable, f.Analysis, f.Evidence)
+		INSERT INTO session_findings (session_id, finding_id, type, severity, observable, analysis, evidence, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, f.FindingID, f.Type, f.Severity, f.Observable, f.Analysis, f.Evidence, status)
+	return err
+}
+
+func (s *Store) UpdateFindingStatus(sessionID, findingID, status string) error {
+	_, err := s.db.Exec(`
+		UPDATE session_findings SET status = ? WHERE session_id = ? AND finding_id = ?
+	`, status, sessionID, findingID)
 	return err
 }
 
 func (s *Store) GetSessionFindings(sessionID string) ([]models.SessionFinding, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, finding_id, type, severity, observable, analysis, evidence, created_at
+		SELECT id, session_id, finding_id, type, severity, observable, analysis, evidence, status, created_at
 		FROM session_findings WHERE session_id = ? ORDER BY created_at ASC
 	`, sessionID)
 	if err != nil {
@@ -482,7 +498,7 @@ func (s *Store) GetSessionFindings(sessionID string) ([]models.SessionFinding, e
 	var findings []models.SessionFinding
 	for rows.Next() {
 		var f models.SessionFinding
-		if err := rows.Scan(&f.ID, &f.SessionID, &f.FindingID, &f.Type, &f.Severity, &f.Observable, &f.Analysis, &f.Evidence, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.SessionID, &f.FindingID, &f.Type, &f.Severity, &f.Observable, &f.Analysis, &f.Evidence, &f.Status, &f.CreatedAt); err != nil {
 			return nil, err
 		}
 		findings = append(findings, f)
@@ -492,7 +508,7 @@ func (s *Store) GetSessionFindings(sessionID string) ([]models.SessionFinding, e
 
 func (s *Store) GetFindingsForAgent(agentID string) ([]models.SessionFinding, error) {
 	rows, err := s.db.Query(`
-		SELECT f.id, f.session_id, f.finding_id, f.type, f.severity, f.observable, f.analysis, f.evidence, f.created_at
+		SELECT f.id, f.session_id, f.finding_id, f.type, f.severity, f.observable, f.analysis, f.evidence, f.status, f.created_at
 		FROM session_findings f
 		JOIN sessions s ON f.session_id = s.id
 		WHERE s.agent_id = ?
@@ -506,7 +522,7 @@ func (s *Store) GetFindingsForAgent(agentID string) ([]models.SessionFinding, er
 	var findings []models.SessionFinding
 	for rows.Next() {
 		var f models.SessionFinding
-		if err := rows.Scan(&f.ID, &f.SessionID, &f.FindingID, &f.Type, &f.Severity, &f.Observable, &f.Analysis, &f.Evidence, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.SessionID, &f.FindingID, &f.Type, &f.Severity, &f.Observable, &f.Analysis, &f.Evidence, &f.Status, &f.CreatedAt); err != nil {
 			return nil, err
 		}
 		findings = append(findings, f)
@@ -618,6 +634,19 @@ func (s *Store) GetSessionAgentConfigs(sessionID string) ([]models.SessionAgentC
 		configs = append(configs, c)
 	}
 	return configs, rows.Err()
+}
+
+func (s *Store) GetSessionUpstreamModel(sessionID string) (string, error) {
+	var model string
+	err := s.db.QueryRow(`
+		SELECT actual_model FROM session_agent_configs
+		WHERE session_id = ? AND actual_model != ''
+		LIMIT 1
+	`, sessionID).Scan(&model)
+	if err != nil {
+		return "", err
+	}
+	return model, nil
 }
 
 func (s *Store) Close() error {

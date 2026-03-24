@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,21 +39,25 @@ type Agent struct {
 	concluded        bool
 	toolFailureCounts   map[string]int
 	profiles            map[string]AgentProfile
+	defaultMaxIter      int // from gateway config, 0 means not set
 	modelsContextWindow map[string]int
 	mu                  sync.Mutex // protects profiles, findings, totalTokensIn, totalTokensOut, modelsContextWindow
 }
 
 type AgentProfile struct {
-	Model       string  `json:"model"`
-	Temperature float32 `json:"temperature"`
-	TopP        float32 `json:"top_p"`
-	TopK        int     `json:"top_k"`
+	Model         string  `json:"model"`
+	Temperature   float32 `json:"temperature"`
+	TopP          float32 `json:"top_p"`
+	TopK          int     `json:"top_k"`
+	MaxIterations int     `json:"max_iterations"`
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-	Name    string `json:"name,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	Name       string     `json:"name,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type Finding struct {
@@ -62,6 +67,7 @@ type Finding struct {
 	Observable string   `json:"observable"`
 	Analysis   string   `json:"analysis"`
 	Evidence   []string `json:"evidence"`
+	Status     string   `json:"status"`
 }
 
 type FindingSummary struct {
@@ -73,7 +79,17 @@ type FindingSummary struct {
 }
 
 // DefaultHTTPTimeout is the default timeout for HTTP requests to the gateway.
-const DefaultHTTPTimeout = 60 * time.Second
+const DefaultHTTPTimeout = 120 * time.Second
+
+// maxGatewayRetries is the number of retry attempts for transient gateway errors (5xx, network).
+const maxGatewayRetries = 3
+
+// maxRateLimitRetries is the number of retry attempts for rate limit (429) errors.
+// Higher than maxGatewayRetries because rate limits are expected with concurrent agents.
+const maxRateLimitRetries = 10
+
+// rateLimitBaseBackoff is the base backoff duration for rate limit retries.
+const rateLimitBaseBackoff = 5 * time.Second
 
 func NewAgent(gatewayURL, apiKey, mode string, maxIter, maxToolFailures int, model, objective, outputDir string, logger *zap.Logger, cleanRoom *CleanRoom, tlsSkipVerify bool, httpTimeout time.Duration) (*Agent, error) {
 	if httpTimeout == 0 {
@@ -143,7 +159,15 @@ func (a *Agent) Run() error {
 	heartbeatDone := make(chan struct{})
 	go a.heartbeatLoop(heartbeatDone)
 	defer close(heartbeatDone)
-	defer a.closeSession()
+
+	var fatalErr error
+	defer func() {
+		if fatalErr != nil {
+			a.closeSessionWithError(fatalErr.Error())
+		} else {
+			a.closeSession()
+		}
+	}()
 
 	hostContext := a.collectHostContext()
 
@@ -156,6 +180,8 @@ func (a *Agent) Run() error {
 	}
 
 	var wg sync.WaitGroup
+	var phaseErrors []string
+	var phaseErrMu sync.Mutex
 	for _, p := range phases {
 		role := "phase_" + p
 		prompt, err := GetPrompt(role, map[string]interface{}{})
@@ -173,10 +199,19 @@ func (a *Agent) Run() error {
 			a.logger.Info("Starting Phase", zap.String("phase", phase))
 			if err := agent.Run(); err != nil {
 				a.logger.Error("Phase agent failed", zap.String("phase", phase), zap.Error(err))
+				phaseErrMu.Lock()
+				phaseErrors = append(phaseErrors, fmt.Sprintf("%s: %s", phase, err.Error()))
+				phaseErrMu.Unlock()
 			}
 		}(p)
 	}
 	wg.Wait()
+
+	// If ALL phases failed, treat as fatal
+	if len(phaseErrors) == len(phases) {
+		fatalErr = fmt.Errorf("all phases failed: %s", strings.Join(phaseErrors, "; "))
+		return fatalErr
+	}
 
 	// Reporter Agent
 	a.logger.Info("Starting Reporter Agent")
@@ -191,8 +226,8 @@ func (a *Agent) Run() error {
 
 	a.generateReports("Multi-agent architecture concluded")
 
-	// Submit findings to gateway
-	a.submitFindingsToGateway()
+	// Validate findings and update statuses at gateway
+	a.validateAndUpdateFindings()
 
 	// Submit report to gateway
 	a.submitReportToGateway(reportPath)
@@ -203,16 +238,15 @@ func (a *Agent) Run() error {
 	return nil
 }
 
-// maxInvestigatorIter caps how many iterations an investigator sub-agent can run.
-// Investigators drill into a single target, so they need far fewer iterations
-// than phase agents that scan broad categories.
-const maxInvestigatorIter = 10
+// defaultInvestigatorMaxIter is the fallback cap for investigator sub-agents
+// when no max_iterations is configured in the profile.
+const defaultInvestigatorMaxIter = 10
 
 func (a *Agent) runInvestigator(target, contextStr string) error {
 	objective := fmt.Sprintf("Analyze target: %s\nContext: %s", target, contextStr)
 	prompt, _ := GetPrompt("investigator", nil)
 	investigator := NewSubAgent(a, "investigator", prompt, objective, GetToolsForRole("investigator"))
-	investigator.maxIter = maxInvestigatorIter
+	investigator.maxIter = defaultInvestigatorMaxIter
 	return investigator.Run()
 }
 
@@ -232,18 +266,24 @@ func (a *Agent) fetchProfiles() {
 	}
 	defer resp.Body.Close()
 
-	var profiles map[string]AgentProfile
-	if err := json.NewDecoder(resp.Body).Decode(&profiles); err == nil {
+	var configResp struct {
+		Agents               map[string]AgentProfile `json:"agents"`
+		DefaultMaxIterations int                     `json:"default_max_iterations"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&configResp); err == nil {
 		a.mu.Lock()
 		if a.profiles == nil {
 			a.profiles = make(map[string]AgentProfile)
 		}
-		for k, v := range profiles {
+		for k, v := range configResp.Agents {
 			a.profiles[k] = v
+		}
+		if configResp.DefaultMaxIterations > 0 {
+			a.defaultMaxIter = configResp.DefaultMaxIterations
 		}
 		count := len(a.profiles)
 		a.mu.Unlock()
-		a.logger.Info("Loaded agent profiles from gateway", zap.Int("count", count))
+		a.logger.Info("Loaded agent profiles from gateway", zap.Int("count", count), zap.Int("default_max_iterations", configResp.DefaultMaxIterations))
 	} else {
 		a.logger.Debug("Failed to decode agent profiles", zap.Error(err))
 	}
@@ -320,13 +360,26 @@ func (a *Agent) sendHeartbeat() {
 }
 
 func (a *Agent) closeSession() {
-	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/sessions/close", nil)
+	a.closeSessionWithError("")
+}
+
+func (a *Agent) closeSessionWithError(errMsg string) {
+	var body io.Reader
+	if errMsg != "" {
+		bodyBytes, _ := json.Marshal(map[string]string{"error": errMsg})
+		body = strings.NewReader(string(bodyBytes))
+	}
+
+	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/sessions/close", body)
 	if err != nil {
 		a.logger.Error("Failed to create close session request", zap.Error(err))
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+a.apiKey)
 	req.Header.Set("X-Hostname", a.hostname())
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -334,7 +387,92 @@ func (a *Agent) closeSession() {
 		return
 	}
 	resp.Body.Close()
-	a.logger.Info("Session closed on gateway")
+
+	if errMsg != "" {
+		a.logger.Error("Session closed with error on gateway", zap.String("error", errMsg))
+	} else {
+		a.logger.Info("Session closed on gateway")
+	}
+}
+
+// doGatewayRequest performs an HTTP request to the gateway with retry and backoff
+// for transient errors (5xx, network errors, rate limits). Terminal errors like
+// token budget exceeded are returned immediately without retry.
+func (a *Agent) doGatewayRequest(req *http.Request, reqBody []byte) (*http.Response, error) {
+	var lastErr error
+	rateLimitAttempts := 0
+
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			a.logger.Warn("Retrying gateway request",
+				zap.Int("attempt", attempt),
+				zap.Error(lastErr))
+		}
+
+		// Clone the request with a fresh body for each attempt
+		retryReq, err := http.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), strings.NewReader(string(reqBody)))
+		if err != nil {
+			return nil, err
+		}
+		retryReq.Header = req.Header
+
+		resp, err := a.httpClient.Do(retryReq)
+		if err != nil {
+			if attempt >= maxGatewayRetries {
+				return nil, fmt.Errorf("gateway request failed after %d retries: %w", attempt, err)
+			}
+			lastErr = err
+			backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
+			time.Sleep(backoff)
+			continue
+		}
+
+		// 5xx: server error, retry with exponential backoff
+		if resp.StatusCode >= 500 {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if attempt >= maxGatewayRetries {
+				return nil, fmt.Errorf("gateway returned status %d after %d retries: %s", resp.StatusCode, attempt, string(bodyBytes))
+			}
+			lastErr = fmt.Errorf("gateway returned status %d: %s", resp.StatusCode, string(bodyBytes))
+			backoff := time.Duration(1<<attempt) * time.Second
+			time.Sleep(backoff)
+			continue
+		}
+
+		// 429: parse error code to distinguish rate limit from terminal errors
+		if resp.StatusCode == http.StatusTooManyRequests {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			// Parse the error response to check the code
+			var errResp struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(bodyBytes, &errResp) == nil && errResp.Error.Code == "token_budget_exceeded" {
+				// Terminal: token budget is exhausted, retrying won't help
+				return nil, fmt.Errorf("token budget exceeded: %s", errResp.Error.Message)
+			}
+
+			// Rate limit: retry with longer backoff + jitter
+			rateLimitAttempts++
+			if rateLimitAttempts > maxRateLimitRetries {
+				return nil, fmt.Errorf("rate limited after %d retries: %s", rateLimitAttempts, string(bodyBytes))
+			}
+			lastErr = fmt.Errorf("rate limited: %s", string(bodyBytes))
+			backoff := rateLimitBaseBackoff * time.Duration(rateLimitAttempts)
+			a.logger.Warn("Rate limited by gateway, backing off",
+				zap.Int("rate_limit_attempt", rateLimitAttempts),
+				zap.Duration("backoff", backoff))
+			time.Sleep(backoff)
+			continue
+		}
+
+		return resp, nil
+	}
 }
 
 // promptOperator presents the proposed tool calls to the operator and waits for approval.
@@ -733,8 +871,12 @@ func (a *Agent) execSubmitFinding(tc ToolCall, args map[string]any) (ToolResult,
 	if finding.ID == "" {
 		finding.ID = fmt.Sprintf("finding-%d", len(a.findings)+1)
 	}
+	finding.Status = "preliminary"
 	a.findings = append(a.findings, finding)
 	a.mu.Unlock()
+
+	// Submit immediately to gateway as preliminary
+	a.submitSingleFindingToGateway(finding)
 
 	a.logger.Info("Finding submitted",
 		zap.String("id", finding.ID),
@@ -875,17 +1017,13 @@ func saveJSON(path string, data any) error {
 	return os.WriteFile(path, jsonBytes, 0644)
 }
 
-func (a *Agent) submitFindingsToGateway() {
-	if len(a.findings) == 0 {
-		return
-	}
-
-	payload := map[string]any{"findings": a.findings}
+func (a *Agent) submitSingleFindingToGateway(f Finding) {
+	payload := map[string]any{"findings": []Finding{f}}
 	body, _ := json.Marshal(payload)
 
 	req, err := http.NewRequest("POST", a.gatewayURL+"/v1/findings", strings.NewReader(string(body)))
 	if err != nil {
-		a.logger.Error("Failed to create findings request", zap.Error(err))
+		a.logger.Error("Failed to create finding request", zap.Error(err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -894,11 +1032,62 @@ func (a *Agent) submitFindingsToGateway() {
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		a.logger.Error("Failed to submit findings to gateway", zap.Error(err))
+		a.logger.Error("Failed to submit finding to gateway", zap.Error(err))
 		return
 	}
 	resp.Body.Close()
-	a.logger.Info("Findings submitted to gateway", zap.Int("count", len(a.findings)))
+	a.logger.Info("Finding submitted to gateway", zap.String("id", f.ID), zap.String("status", f.Status))
+}
+
+func (a *Agent) validateAndUpdateFindings() {
+	if len(a.findings) == 0 {
+		return
+	}
+
+	// Deduplicate by observable — first occurrence wins, later ones marked duplicate
+	seen := map[string]string{} // observable -> finding ID of first occurrence
+	type statusUpdate struct {
+		FindingID string `json:"finding_id"`
+		Status    string `json:"status"`
+	}
+	var updates []statusUpdate
+
+	for i := range a.findings {
+		f := &a.findings[i]
+		if firstID, exists := seen[f.Observable]; exists {
+			f.Status = "duplicate"
+			a.logger.Info("Finding marked as duplicate",
+				zap.String("id", f.ID),
+				zap.String("duplicate_of", firstID))
+		} else if f.Type == "incomplete_investigation" && f.Severity == "info" {
+			f.Status = "invalid"
+		} else {
+			f.Status = "valid"
+		}
+		seen[f.Observable] = f.ID
+		updates = append(updates, statusUpdate{FindingID: f.ID, Status: f.Status})
+	}
+
+	// Send bulk status update to gateway
+	payload := map[string]any{"findings": updates}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("PATCH", a.gatewayURL+"/v1/findings/status", strings.NewReader(string(body)))
+	if err != nil {
+		a.logger.Error("Failed to create findings status update request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Error("Failed to update finding statuses at gateway", zap.Error(err))
+		return
+	}
+	resp.Body.Close()
+	a.logger.Info("Finding statuses updated at gateway", zap.Int("count", len(updates)))
 }
 
 func (a *Agent) submitReportToGateway(reportPath string) {

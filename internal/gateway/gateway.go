@@ -113,6 +113,7 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/v1/heartbeat", g.heartbeatHandler).Methods("POST")
 	router.HandleFunc("/v1/sessions/close", g.closeSessionHandler).Methods("POST")
 	router.HandleFunc("/v1/findings", g.submitFindingsHandler).Methods("POST")
+	router.HandleFunc("/v1/findings/status", g.updateFindingStatusHandler).Methods("PATCH")
 	router.HandleFunc("/v1/report", g.submitReportHandler).Methods("POST")
 	router.HandleFunc("/v1/agent-settings", g.submitAgentSettingsHandler).Methods("POST")
 
@@ -269,10 +270,16 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
+	var tokensIn, tokensOut int
+	if resp.Usage != nil {
+		tokensIn = resp.Usage.PromptTokens
+		tokensOut = resp.Usage.CompletionTokens
+	}
+
 	g.store.LogAudit(agent.ID, "response", map[string]any{
 		"model":       resp.Model,
-		"tokens_in":   resp.Usage.PromptTokens,
-		"tokens_out":  resp.Usage.CompletionTokens,
+		"tokens_in":   tokensIn,
+		"tokens_out":  tokensOut,
 		"cost_usd":    costUSD,
 		"latency_ms":  latency,
 		"timestamp":   time.Now().UTC().Format(time.RFC3339),
@@ -280,15 +287,15 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 
 	g.log.Info("Request completed",
 		zap.String("model", resp.Model),
-		zap.Int("tokens_in", resp.Usage.PromptTokens),
-		zap.Int("tokens_out", resp.Usage.CompletionTokens),
+		zap.Int("tokens_in", tokensIn),
+		zap.Int("tokens_out", tokensOut),
 		zap.Float64("cost_usd", costUSD),
 		zap.Int64("latency_ms", latency),
 		zap.String("hostname", agent.Hostname))
 
 	if resp.Usage != nil {
 		g.mu.Lock()
-		g.tokenCounts[sessionID] += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+		g.tokenCounts[sessionID] += tokensIn + tokensOut
 		g.mu.Unlock()
 	}
 
@@ -297,7 +304,7 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		Content:      resp.Choices[0].Message.Content,
 		ToolCalls:    resp.Choices[0].Message.ToolCalls,
 		SubAgentRole: subAgentRole,
-	}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
+	}, resp.Model, tokensIn, tokensOut, costUSD, int(latency))
 
 	g.store.UpdateAgentConfigUpstream(sessionID, subAgentRole, req.Model, resp.Model, g.config.Providers[0].Name)
 
@@ -349,7 +356,10 @@ func (g *Gateway) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	g.log.Debug("Serving agent profile config", zap.String("hostname", agent.Hostname))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(g.config.Agents)
+	json.NewEncoder(w).Encode(map[string]any{
+		"agents":                 g.config.Agents,
+		"default_max_iterations": g.config.DefaultMaxIterations,
+	})
 }
 
 func (g *Gateway) sessionReaper() {
@@ -411,13 +421,32 @@ func (g *Gateway) closeSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := g.store.CloseSession(session.ID); err != nil {
-		g.log.Error("Failed to close session", zap.Error(err))
-		http.Error(w, "failed to close session", http.StatusInternalServerError)
-		return
+	// Check if the agent is reporting an error
+	var req struct {
+		Error string `json:"error"`
+	}
+	// Body is optional — if missing or unparseable, error stays empty
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if req.Error != "" {
+		if err := g.store.CloseSessionWithError(session.ID, req.Error); err != nil {
+			g.log.Error("Failed to close session with error", zap.Error(err))
+			http.Error(w, "failed to close session", http.StatusInternalServerError)
+			return
+		}
+		g.log.Warn("Session closed with error",
+			zap.String("session_id", session.ID),
+			zap.String("hostname", agent.Hostname),
+			zap.String("error", req.Error))
+	} else {
+		if err := g.store.CloseSession(session.ID); err != nil {
+			g.log.Error("Failed to close session", zap.Error(err))
+			http.Error(w, "failed to close session", http.StatusInternalServerError)
+			return
+		}
+		g.log.Info("Session closed by agent", zap.String("session_id", session.ID), zap.String("hostname", agent.Hostname))
 	}
 
-	g.log.Info("Session closed by agent", zap.String("session_id", session.ID), zap.String("hostname", agent.Hostname))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"session_id": session.ID, "status": "closed"})
 }
@@ -505,10 +534,16 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 		_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 
+	var tokensIn, tokensOut int
+	if resp.Usage != nil {
+		tokensIn = resp.Usage.PromptTokens
+		tokensOut = resp.Usage.CompletionTokens
+	}
+
 	g.store.LogAudit(agent.ID, "response", map[string]any{
 		"model":      resp.Model,
-		"tokens_in":  resp.Usage.PromptTokens,
-		"tokens_out": resp.Usage.CompletionTokens,
+		"tokens_in":  tokensIn,
+		"tokens_out": tokensOut,
 		"cost_usd":   costUSD,
 		"latency_ms": latency,
 		"stream":     true,
@@ -517,15 +552,15 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 
 	g.log.Info("Streaming request completed",
 		zap.String("model", resp.Model),
-		zap.Int("tokens_in", resp.Usage.PromptTokens),
-		zap.Int("tokens_out", resp.Usage.CompletionTokens),
+		zap.Int("tokens_in", tokensIn),
+		zap.Int("tokens_out", tokensOut),
 		zap.Float64("cost_usd", costUSD),
 		zap.Int64("latency_ms", latency))
 
 	if len(resp.Choices) > 0 {
 		if resp.Usage != nil {
 			g.mu.Lock()
-			g.tokenCounts[sessionID] += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+			g.tokenCounts[sessionID] += tokensIn + tokensOut
 			g.mu.Unlock()
 		}
 		g.store.AppendMessage(sessionID, &models.Message{
@@ -533,7 +568,7 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 			Content:      resp.Choices[0].Message.Content,
 			ToolCalls:    resp.Choices[0].Message.ToolCalls,
 			SubAgentRole: r.Header.Get("X-Sub-Agent-Role"),
-		}, resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, costUSD, int(latency))
+		}, resp.Model, tokensIn, tokensOut, costUSD, int(latency))
 
 		g.store.UpdateAgentConfigUpstream(sessionID, r.Header.Get("X-Sub-Agent-Role"), req.Model, resp.Model, g.config.Providers[0].Name)
 	}
@@ -609,6 +644,7 @@ func (g *Gateway) submitFindingsHandler(w http.ResponseWriter, r *http.Request) 
 			Observable string   `json:"observable"`
 			Analysis   string   `json:"analysis"`
 			Evidence   []string `json:"evidence"`
+			Status     string   `json:"status"`
 		} `json:"findings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -624,6 +660,10 @@ func (g *Gateway) submitFindingsHandler(w http.ResponseWriter, r *http.Request) 
 
 	for _, f := range req.Findings {
 		evidenceJSON, _ := json.Marshal(f.Evidence)
+		status := f.Status
+		if status == "" {
+			status = "preliminary"
+		}
 		g.store.AddFinding(session.ID, &models.SessionFinding{
 			FindingID:  f.ID,
 			Type:       f.Type,
@@ -631,10 +671,46 @@ func (g *Gateway) submitFindingsHandler(w http.ResponseWriter, r *http.Request) 
 			Observable: f.Observable,
 			Analysis:   f.Analysis,
 			Evidence:   string(evidenceJSON),
+			Status:     status,
 		})
 	}
 
 	g.log.Info("Findings submitted", zap.String("hostname", agent.Hostname), zap.Int("count", len(req.Findings)))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "count": len(req.Findings)})
+}
+
+func (g *Gateway) updateFindingStatusHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Findings []struct {
+			FindingID string `json:"finding_id"`
+			Status    string `json:"status"`
+		} `json:"findings"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		http.Error(w, "no active session", http.StatusBadRequest)
+		return
+	}
+
+	for _, f := range req.Findings {
+		if err := g.store.UpdateFindingStatus(session.ID, f.FindingID, f.Status); err != nil {
+			g.log.Error("Failed to update finding status", zap.String("finding_id", f.FindingID), zap.Error(err))
+		}
+	}
+
+	g.log.Info("Finding statuses updated", zap.String("hostname", agent.Hostname), zap.Int("count", len(req.Findings)))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "count": len(req.Findings)})
 }

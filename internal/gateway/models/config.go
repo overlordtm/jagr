@@ -12,14 +12,16 @@ type Config struct {
 	Logging   LoggingConfig  `yaml:"logging"`
 	Dashboard DashboardConfig `yaml:"dashboard"`
 	Timeouts  TimeoutConfig  `yaml:"timeouts"`
-	Agents    map[string]AgentProfile `yaml:"agents,omitempty"`
+	DefaultMaxIterations int                    `yaml:"default_max_iterations,omitempty"`
+	Agents               map[string]AgentProfile `yaml:"agents,omitempty"`
 }
 
 type AgentProfile struct {
-	Model       string  `yaml:"model" json:"model"`
-	Temperature float32 `yaml:"temperature,omitempty" json:"temperature,omitempty"`
-	TopP        float32 `yaml:"top_p,omitempty" json:"top_p,omitempty"`
-	TopK        int     `yaml:"top_k,omitempty" json:"top_k,omitempty"`
+	Model         string  `yaml:"model" json:"model"`
+	Temperature   float32 `yaml:"temperature,omitempty" json:"temperature,omitempty"`
+	TopP          float32 `yaml:"top_p,omitempty" json:"top_p,omitempty"`
+	TopK          int     `yaml:"top_k,omitempty" json:"top_k,omitempty"`
+	MaxIterations int     `yaml:"max_iterations,omitempty" json:"max_iterations,omitempty"`
 }
 
 type DashboardConfig struct {

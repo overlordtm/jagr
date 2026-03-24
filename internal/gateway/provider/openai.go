@@ -98,44 +98,73 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		zap.String("model", req.Model),
 		zap.Int("messages", len(req.Messages)),
 		zap.String("base_url", p.baseURL))
-	
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewBuffer(reqBytes))
-	if err != nil {
-		return nil, err
-	}
-	
-	httpReq.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	
+
+	const maxRetries = 3
+	var lastErr error
 	client := &http.Client{Timeout: p.requestTimeout}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, err
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<(attempt-1)) * time.Second // 1s, 2s, 4s
+			p.log.Warn("Retrying provider request after transient error",
+				zap.Int("attempt", attempt),
+				zap.Duration("backoff", backoff),
+				zap.Error(lastErr))
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewBuffer(reqBytes))
+		if err != nil {
+			return nil, err
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		if p.apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		}
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode >= 500 {
+			p.log.Error("Provider returned error",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(body)))
+			lastErr = fmt.Errorf("provider error: status %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			p.log.Error("Provider returned error",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(body)))
+			return nil, fmt.Errorf("provider error: status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var reply models.ChatCompletionResponse
+		if err := json.Unmarshal(body, &reply); err != nil {
+			return nil, err
+		}
+
+		p.log.Debug("Got response from provider",
+			zap.String("model", reply.Model),
+			zap.Int("choices", len(reply.Choices)))
+
+		return &reply, nil
 	}
-	defer resp.Body.Close()
-	
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	
-	if resp.StatusCode != http.StatusOK {
-		p.log.Error("Provider returned error",
-			zap.Int("status", resp.StatusCode),
-			zap.String("body", string(body)))
-		return nil, fmt.Errorf("provider error: status %d: %s", resp.StatusCode, string(body))
-	}
-	
-	var reply models.ChatCompletionResponse
-	if err := json.Unmarshal(body, &reply); err != nil {
-		return nil, err
-	}
-	
-	p.log.Debug("Got response from provider",
-		zap.String("model", reply.Model),
-		zap.Int("choices", len(reply.Choices)))
-	
-	return &reply, nil
+
+	return nil, lastErr
 }

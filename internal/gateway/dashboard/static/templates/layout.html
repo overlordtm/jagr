@@ -181,8 +181,18 @@ function switchAgentTab(btn, tab) {
         <h1 class="text-2xl font-semibold text-white">Session {{shortID .Session.ID}}</h1>
         <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium {{statusColor .Session.Status}}">{{.Session.Status}}</span>
         <span class="text-xs text-gray-400 font-mono">{{formatDuration .Duration}}</span>
+        {{if .UpstreamModel}}<span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium bg-sky-500/20 text-sky-400">{{.UpstreamModel}}</span>{{end}}
     </div>
     <p class="text-sm text-gray-500 mt-1">Created {{formatTime .Session.CreatedAt}} <span class="mx-1 text-gray-700">|</span> Updated {{formatTime .Session.UpdatedAt}}</p>
+    {{if .Session.Error}}
+    <div class="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3">
+        <div class="flex items-center gap-2 mb-1">
+            <svg class="h-4 w-4 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+            <span class="text-sm font-medium text-red-400">Error</span>
+        </div>
+        <p class="text-sm text-red-300/80">{{.Session.Error}}</p>
+    </div>
+    {{end}}
 </div>
 
 <!-- Session Tabs -->

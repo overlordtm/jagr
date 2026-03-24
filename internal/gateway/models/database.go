@@ -17,6 +17,7 @@ type Session struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 	Status        string     `json:"status"`
 	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+	Error         string     `json:"error,omitempty"`
 }
 
 type MessageLog struct {
@@ -52,6 +53,7 @@ type SessionFinding struct {
 	Observable string    `json:"observable"`
 	Analysis   string    `json:"analysis"`
 	Evidence   string    `json:"evidence"`
+	Status     string    `json:"status"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 

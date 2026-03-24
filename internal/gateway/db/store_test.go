@@ -163,8 +163,8 @@ func TestCloseSession(t *testing.T) {
 	}
 
 	found, _ := store.GetSession(session.ID)
-	if found.Status != "closed" {
-		t.Errorf("Expected status closed, got %s", found.Status)
+	if found.Status != "completed" {
+		t.Errorf("Expected status completed, got %s", found.Status)
 	}
 }
 
@@ -215,5 +215,77 @@ func TestLogAudit(t *testing.T) {
 func TestErrNotFound(t *testing.T) {
 	if ErrNotFound == nil {
 		t.Error("Expected ErrNotFound to be defined")
+	}
+}
+
+func TestUpdateFindingStatus(t *testing.T) {
+	store := newTestStore(t)
+
+	agent, _ := store.FindOrCreateAgentByHostname("host-finding")
+	session, _ := store.CreateSession(agent.ID)
+
+	// Add a finding with preliminary status
+	err := store.AddFinding(session.ID, &models.SessionFinding{
+		FindingID:  "finding-1",
+		Type:       "misconfiguration",
+		Severity:   "high",
+		Observable: "/etc/shadow",
+		Analysis:   "World-readable shadow file",
+		Evidence:   `["ls -la /etc/shadow"]`,
+		Status:     "preliminary",
+	})
+	if err != nil {
+		t.Fatalf("Failed to add finding: %v", err)
+	}
+
+	// Verify preliminary status
+	findings, err := store.GetSessionFindings(session.ID)
+	if err != nil {
+		t.Fatalf("Failed to get findings: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("Expected 1 finding, got %d", len(findings))
+	}
+	if findings[0].Status != "preliminary" {
+		t.Errorf("Expected status preliminary, got %s", findings[0].Status)
+	}
+
+	// Update to valid
+	err = store.UpdateFindingStatus(session.ID, "finding-1", "valid")
+	if err != nil {
+		t.Fatalf("Failed to update finding status: %v", err)
+	}
+
+	// Verify updated status
+	findings, err = store.GetSessionFindings(session.ID)
+	if err != nil {
+		t.Fatalf("Failed to get findings after update: %v", err)
+	}
+	if findings[0].Status != "valid" {
+		t.Errorf("Expected status valid, got %s", findings[0].Status)
+	}
+
+	// Add another finding and mark as duplicate
+	store.AddFinding(session.ID, &models.SessionFinding{
+		FindingID:  "finding-2",
+		Type:       "misconfiguration",
+		Severity:   "high",
+		Observable: "/etc/shadow",
+		Status:     "preliminary",
+	})
+	err = store.UpdateFindingStatus(session.ID, "finding-2", "duplicate")
+	if err != nil {
+		t.Fatalf("Failed to update finding status to duplicate: %v", err)
+	}
+
+	findings, err = store.GetSessionFindings(session.ID)
+	if err != nil {
+		t.Fatalf("Failed to get findings: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("Expected 2 findings, got %d", len(findings))
+	}
+	if findings[1].Status != "duplicate" {
+		t.Errorf("Expected status duplicate, got %s", findings[1].Status)
 	}
 }

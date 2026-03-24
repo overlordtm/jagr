@@ -49,7 +49,13 @@ func (sa *SubAgent) Run() error {
 
 	iterLimit := sa.maxIter
 	if iterLimit == 0 {
-		iterLimit = sa.parent.maxIter
+		if profile, ok := sa.parent.GetProfile(sa.role); ok && profile.MaxIterations > 0 {
+			iterLimit = profile.MaxIterations
+		} else if sa.parent.defaultMaxIter > 0 {
+			iterLimit = sa.parent.defaultMaxIter
+		} else {
+			iterLimit = sa.parent.maxIter
+		}
 	}
 	for sa.iterations < iterLimit {
 		if sa.needsCompaction() {
@@ -97,12 +103,52 @@ func (sa *SubAgent) Run() error {
 		}
 	}
 
-	sa.parent.logger.Info("SubAgent Max iterations reached", zap.String("role", sa.role))
+	sa.parent.logger.Warn("SubAgent Max iterations reached", zap.String("role", sa.role))
 	sa.concluded = true
-	if err := sa.parent.logEvent("subagent_conclude", map[string]any{"role": sa.role, "summary": "Maximum iterations reached"}); err != nil {
+
+	// Submit a finding so partial work is not lost
+	sa.parent.mu.Lock()
+	finding := Finding{
+		ID:         fmt.Sprintf("finding-%d", len(sa.parent.findings)+1),
+		Type:       "incomplete_investigation",
+		Severity:   "info",
+		Observable: fmt.Sprintf("subagent:%s", sa.role),
+		Analysis:   fmt.Sprintf("SubAgent %q reached maximum iterations (%d) before completing its investigation. Manual review is required to finish this analysis.", sa.role, iterLimit),
+		Evidence:   sa.gatherPartialEvidence(),
+		Status:     "preliminary",
+	}
+	sa.parent.findings = append(sa.parent.findings, finding)
+	sa.parent.mu.Unlock()
+
+	// Submit immediately to gateway
+	sa.parent.submitSingleFindingToGateway(finding)
+
+	sa.parent.logger.Info("Partial finding submitted for max-iteration subagent",
+		zap.String("id", finding.ID),
+		zap.String("role", sa.role))
+
+	if err := sa.parent.logEvent("subagent_conclude", map[string]any{
+		"role":       sa.role,
+		"summary":    "Maximum iterations reached — partial finding submitted, needs manual investigation",
+		"finding_id": finding.ID,
+	}); err != nil {
 		sa.parent.logger.Error("Failed to log subagent conclude event", zap.Error(err))
 	}
 	return nil
+}
+
+func (sa *SubAgent) gatherPartialEvidence() []string {
+	var evidence []string
+	for _, msg := range sa.conversation {
+		if msg.Role == "tool" && !strings.Contains(msg.Content, "Error:") && msg.Content != "" {
+			snippet := msg.Content
+			if len(snippet) > 200 {
+				snippet = snippet[:200] + "..."
+			}
+			evidence = append(evidence, fmt.Sprintf("[%s] %s", msg.Name, snippet))
+		}
+	}
+	return evidence
 }
 
 func (sa *SubAgent) formatToolsForPrompt() string {
@@ -116,12 +162,19 @@ func (sa *SubAgent) formatToolsForPrompt() string {
 func (sa *SubAgent) think() ([]ToolCall, error) {
 	sa.iterations++
 
-	messages := make([]map[string]string, len(sa.conversation))
+	messages := make([]map[string]any, len(sa.conversation))
 	for i, m := range sa.conversation {
-		messages[i] = map[string]string{
+		msg := map[string]any{
 			"role":    m.Role,
 			"content": m.Content,
 		}
+		if len(m.ToolCalls) > 0 {
+			msg["tool_calls"] = m.ToolCalls
+		}
+		if m.ToolCallID != "" {
+			msg["tool_call_id"] = m.ToolCallID
+		}
+		messages[i] = msg
 	}
 
 	tools := make([]map[string]any, 0)
@@ -168,11 +221,15 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 	req.Header.Set("X-Hostname", sa.parent.hostname())
 	req.Header.Set("X-Sub-Agent-Role", sa.role)
 
-	resp, err := sa.parent.httpClient.Do(req)
+	resp, err := sa.parent.doGatewayRequest(req, reqBytes)
 	if err != nil {
 		return nil, fmt.Errorf("gateway request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned unexpected status %d", resp.StatusCode)
+	}
 
 	var reply map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
@@ -195,16 +252,12 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 		choice, _ := choices[0].(map[string]any)
 		if msg, ok := choice["message"].(map[string]any); ok {
 			content, _ := msg["content"].(string)
-			sa.conversation = append(sa.conversation, Message{
-				Role:    "assistant",
-				Content: content,
-			})
 
-			if toolCalls, ok := msg["tool_calls"].([]any); ok {
-				var result []ToolCall
-				for _, tc := range toolCalls {
+			if rawToolCalls, ok := msg["tool_calls"].([]any); ok {
+				var parsedCalls []ToolCall
+				for _, tc := range rawToolCalls {
 					if tcMap, ok := tc.(map[string]any); ok {
-						result = append(result, ToolCall{
+						parsedCalls = append(parsedCalls, ToolCall{
 							ID:   tcMap["id"].(string),
 							Type: tcMap["type"].(string),
 							Function: Function{
@@ -214,8 +267,20 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 						})
 					}
 				}
-				return result, nil
+				// Store assistant message WITH tool_calls so the conversation
+				// has proper tool call/result pairing (required by Anthropic).
+				sa.conversation = append(sa.conversation, Message{
+					Role:      "assistant",
+					Content:   content,
+					ToolCalls: parsedCalls,
+				})
+				return parsedCalls, nil
 			}
+
+			sa.conversation = append(sa.conversation, Message{
+				Role:    "assistant",
+				Content: content,
+			})
 
 			if content != "" {
 				sa.parent.logger.Info("LLM responded without tool calls, concluding SubAgent", zap.String("role", sa.role))
@@ -285,11 +350,15 @@ func (sa *SubAgent) compactHistory() error {
 	req.Header.Set("X-Hostname", sa.parent.hostname())
 	req.Header.Set("X-Sub-Agent-Role", sa.role+"-compactor")
 
-	resp, err := sa.parent.httpClient.Do(req)
+	resp, err := sa.parent.doGatewayRequest(req, reqBytes)
 	if err != nil {
 		return fmt.Errorf("gateway request for summary failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gateway returned unexpected status %d for summary", resp.StatusCode)
+	}
 
 	var reply map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
@@ -417,9 +486,10 @@ func (sa *SubAgent) executeTool(tc ToolCall) (ToolResult, error) {
 func (sa *SubAgent) observe(results []ToolResult) error {
 	for _, result := range results {
 		sa.conversation = append(sa.conversation, Message{
-			Role:    "tool",
-			Content: result.Content,
-			Name:    result.Name,
+			Role:       "tool",
+			Content:    result.Content,
+			Name:       result.Name,
+			ToolCallID: result.ToolID,
 		})
 
 		if err := sa.parent.logEvent("tool_result", map[string]any{
