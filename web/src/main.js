@@ -79,4 +79,35 @@ document.addEventListener("DOMContentLoaded", function () {
   renderMarkdown(document.body);
   var sort = localStorage.getItem("jagr-msg-sort");
   if (sort) applySortMode(sort);
+  updateLiveRefreshUI();
+});
+
+// Live Refresh Toggle
+window.isLiveRefreshEnabled = function() {
+  return localStorage.getItem("jagr-live-refresh") !== "false";
+};
+
+function updateLiveRefreshUI() {
+  const indicator = document.getElementById("live-refresh-indicator");
+  const status = document.getElementById("live-refresh-status");
+  if (!indicator || !status) return;
+
+  const enabled = window.isLiveRefreshEnabled();
+  if (enabled) {
+    indicator.classList.remove("hidden");
+    status.classList.add("text-emerald-400");
+    status.classList.remove("text-gray-500");
+  } else {
+    indicator.classList.add("hidden");
+    status.classList.remove("text-emerald-400");
+    status.classList.add("text-gray-500");
+  }
+}
+
+document.addEventListener("click", function (evt) {
+  var btn = evt.target.closest("#live-refresh-toggle");
+  if (!btn) return;
+  const newState = !window.isLiveRefreshEnabled();
+  localStorage.setItem("jagr-live-refresh", newState);
+  updateLiveRefreshUI();
 });

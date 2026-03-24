@@ -273,18 +273,15 @@ func execLocalCommand(cmd string, r io.Reader) error {
 	return c.Run()
 }
 
-// scpCopy copies a local file to the remote host using the SCP protocol over an SSH session.
+// scpCopy copies a local file to the remote host by streaming it through an SSH session.
+// It uses cat + chmod instead of the legacy SCP protocol, which is no longer available
+// on newer OpenSSH servers (9.0+).
 func scpCopy(client *ssh.Client, localPath, remotePath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
-	stat, err := f.Stat()
-	if err != nil {
-		return err
-	}
 
 	session, err := client.NewSession()
 	if err != nil {
@@ -297,55 +294,21 @@ func scpCopy(client *ssh.Client, localPath, remotePath string) error {
 		return err
 	}
 
-	r, err := session.StdoutPipe()
-	if err != nil {
-		return err
-	}
-
 	var stderrBuf strings.Builder
 	session.Stderr = &stderrBuf
 
-	if err := session.Start("scp -t " + remotePath); err != nil {
-		return fmt.Errorf("start scp: %w", err)
+	cmd := fmt.Sprintf("cat > %s && chmod 755 %s", remotePath, remotePath)
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("start remote copy: %w", err)
 	}
 
-	// Helper to read SCP ack byte (0 = OK, 1 = warning, 2 = fatal)
-	ack := make([]byte, 1)
-	readAck := func() error {
-		if _, err := io.ReadFull(r, ack); err != nil {
-			return fmt.Errorf("read ack: %w", err)
-		}
-		if ack[0] != 0 {
-			return fmt.Errorf("scp server error (code %d): %s", ack[0], stderrBuf.String())
-		}
-		return nil
-	}
-
-	// Wait for initial ready ack
-	if err := readAck(); err != nil {
-		return err
-	}
-
-	// Send file header
-	fmt.Fprintf(w, "C0755 %d %s\n", stat.Size(), filepath.Base(remotePath))
-	if err := readAck(); err != nil {
-		return err
-	}
-
-	// Send file contents
 	if _, err := io.Copy(w, f); err != nil {
 		return fmt.Errorf("copy file data: %w", err)
 	}
-
-	// Send transfer complete
-	fmt.Fprint(w, "\x00")
-	if err := readAck(); err != nil {
-		return err
-	}
-
 	w.Close()
+
 	if err := session.Wait(); err != nil {
-		return fmt.Errorf("scp session: %w; stderr: %s", err, stderrBuf.String())
+		return fmt.Errorf("remote copy: %w; stderr: %s", err, stderrBuf.String())
 	}
 	return nil
 }

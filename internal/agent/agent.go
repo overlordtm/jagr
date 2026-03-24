@@ -36,9 +36,10 @@ type Agent struct {
 	findings         []Finding
 	startTime        time.Time
 	concluded        bool
-	toolFailureCounts map[string]int
-	profiles          map[string]AgentProfile
-	mu                sync.Mutex // protects profiles, findings, totalTokensIn, totalTokensOut
+	toolFailureCounts   map[string]int
+	profiles            map[string]AgentProfile
+	modelsContextWindow map[string]int
+	mu                  sync.Mutex // protects profiles, findings, totalTokensIn, totalTokensOut, modelsContextWindow
 }
 
 type AgentProfile struct {
@@ -98,9 +99,10 @@ func NewAgent(gatewayURL, apiKey, mode string, maxIter, maxToolFailures int, mod
 		logger:            logger,
 		cleanRoom:         cleanRoom,
 		httpClient:        httpClient,
-		startTime:         time.Now(),
-		toolFailureCounts: make(map[string]int),
-		profiles:          make(map[string]AgentProfile),
+		startTime:           time.Now(),
+		toolFailureCounts:   make(map[string]int),
+		profiles:            make(map[string]AgentProfile),
+		modelsContextWindow: make(map[string]int),
 	}, nil
 }
 
@@ -136,6 +138,7 @@ func (a *Agent) Run() error {
 	}
 
 	a.fetchProfiles()
+	a.fetchModelsContextWindows()
 
 	heartbeatDone := make(chan struct{})
 	go a.heartbeatLoop(heartbeatDone)
@@ -243,6 +246,43 @@ func (a *Agent) fetchProfiles() {
 		a.logger.Info("Loaded agent profiles from gateway", zap.Int("count", count))
 	} else {
 		a.logger.Debug("Failed to decode agent profiles", zap.Error(err))
+	}
+}
+
+func (a *Agent) fetchModelsContextWindows() {
+	req, err := http.NewRequest("GET", a.gatewayURL+"/v1/models", nil)
+	if err != nil {
+		a.logger.Debug("Failed to create models fetch request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	req.Header.Set("X-Hostname", a.hostname())
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.logger.Debug("Failed to fetch models", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	var modelsResp struct {
+		Data []struct {
+			ID               string `json:"id"`
+			MaxContextWindow int    `json:"max_context_window"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err == nil {
+		a.mu.Lock()
+		for _, m := range modelsResp.Data {
+			if m.MaxContextWindow > 0 {
+				a.modelsContextWindow[m.ID] = m.MaxContextWindow
+			}
+		}
+		a.mu.Unlock()
+		a.logger.Info("Loaded model context windows from gateway")
+	} else {
+		a.logger.Debug("Failed to decode models", zap.Error(err))
 	}
 }
 

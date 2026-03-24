@@ -23,6 +23,7 @@ type SubAgent struct {
 	toolFailureCounts map[string]int
 	investigatorWg    sync.WaitGroup
 	delegatedTargets  map[string]bool
+	lastPromptTokens  int
 }
 
 func NewSubAgent(parent *Agent, role, systemPrompt, objective string, initialTools []Tool) *SubAgent {
@@ -51,6 +52,12 @@ func (sa *SubAgent) Run() error {
 		iterLimit = sa.parent.maxIter
 	}
 	for sa.iterations < iterLimit {
+		if sa.needsCompaction() {
+			if err := sa.compactHistory(); err != nil {
+				sa.parent.logger.Error("History compaction failed", zap.String("role", sa.role), zap.Error(err))
+			}
+		}
+
 		sa.parent.logger.Info("SubAgent Thinking", zap.String("role", sa.role), zap.Int("iteration", sa.iterations+1))
 
 		toolCalls, err := sa.think()
@@ -176,6 +183,7 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 		sa.parent.mu.Lock()
 		if promptTokens, ok := usage["prompt_tokens"].(float64); ok {
 			sa.parent.totalTokensIn += int(promptTokens)
+			sa.lastPromptTokens = int(promptTokens)
 		}
 		if completionTokens, ok := usage["completion_tokens"].(float64); ok {
 			sa.parent.totalTokensOut += int(completionTokens)
@@ -221,6 +229,99 @@ func (sa *SubAgent) think() ([]ToolCall, error) {
 	}
 
 	return nil, fmt.Errorf("no tool calls in response")
+}
+
+func (sa *SubAgent) needsCompaction() bool {
+	sa.parent.mu.Lock()
+	maxContext := 0
+	model := sa.parent.model
+	if profile, hasProfile := sa.parent.profiles[sa.role]; hasProfile && profile.Model != "" {
+		model = profile.Model
+	}
+	if ctx, ok := sa.parent.modelsContextWindow[model]; ok {
+		maxContext = ctx
+	}
+	sa.parent.mu.Unlock()
+
+	if maxContext == 0 {
+		return false
+	}
+
+	return sa.lastPromptTokens > int(float64(maxContext)*0.8)
+}
+
+func (sa *SubAgent) compactHistory() error {
+	sa.parent.logger.Info("Context window nearing limit, compacting history", zap.String("role", sa.role), zap.Int("lastPromptTokens", sa.lastPromptTokens))
+
+	if len(sa.conversation) <= 5 {
+		return nil // Not enough messages to compact effectively
+	}
+
+	// Keep the system prompt, user objective, and the last 3 messages.
+	// Compact everything in between.
+	keepFront := 2
+	keepBack := 3
+	compactLen := len(sa.conversation) - keepFront - keepBack
+
+	if compactLen <= 0 {
+		return nil
+	}
+
+	messagesToCompact := sa.conversation[keepFront : keepFront+compactLen]
+	compactBytes, _ := json.Marshal(messagesToCompact)
+
+	summaryReq := map[string]any{
+		"model": "summarize",
+		"messages": []map[string]string{
+			{"role": "system", "content": "You are a specialized agent for summarizing conversational histories. Provide a concise but comprehensive summary of the provided events and tool results, ensuring all important facts, discovered files, paths, findings, errors, and progress state remain intact."},
+			{"role": "user", "content": string(compactBytes)},
+		},
+	}
+
+	reqBytes, _ := json.Marshal(summaryReq)
+	req, _ := http.NewRequest("POST", sa.parent.gatewayURL+"/v1/chat/completions", strings.NewReader(string(reqBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sa.parent.apiKey)
+	req.Header.Set("X-Hostname", sa.parent.hostname())
+	req.Header.Set("X-Sub-Agent-Role", sa.role+"-compactor")
+
+	resp, err := sa.parent.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("gateway request for summary failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var reply map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return fmt.Errorf("failed to decode summary response: %w", err)
+	}
+
+	var summary string
+	if choices, ok := reply["choices"].([]any); ok && len(choices) > 0 {
+		choice, _ := choices[0].(map[string]any)
+		if msg, ok := choice["message"].(map[string]any); ok {
+			summary, _ = msg["content"].(string)
+		}
+	}
+
+	if summary == "" {
+		return fmt.Errorf("empty summary returned")
+	}
+
+	// Re-construct conversation
+	var newConv []Message
+	newConv = append(newConv, sa.conversation[:keepFront]...)
+	newConv = append(newConv, Message{
+		Role:    "system",
+		Content: "Prior history was compacted to prevent context overflow. Here is the summary of prior events:\n\n" + summary,
+	})
+	newConv = append(newConv, sa.conversation[len(sa.conversation)-keepBack:]...)
+
+	sa.conversation = newConv
+	sa.lastPromptTokens = 0 // reset so we don't compact again immediately loop
+	sa.parent.logger.Info("History compaction successful", zap.Int("new_conversation_length", len(sa.conversation)))
+
+	return nil
 }
 
 func (sa *SubAgent) act(toolCalls []ToolCall) ([]ToolResult, error) {

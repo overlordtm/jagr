@@ -80,9 +80,10 @@ type ProviderConfig struct {
 }
 
 type ModelMapping struct {
-	Alias      string         `yaml:"alias"`
-	Upstream   string         `yaml:"upstream"`
-	ExtraBody  map[string]any `yaml:"extra_body,omitempty"`
+	Alias            string         `yaml:"alias"`
+	Upstream         string         `yaml:"upstream"`
+	MaxContextWindow int            `yaml:"max_context_window,omitempty"`
+	ExtraBody        map[string]any `yaml:"extra_body,omitempty"`
 }
 
 type LoggingConfig struct {

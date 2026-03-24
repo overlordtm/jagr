@@ -74,10 +74,11 @@ type ErrorInfo struct {
 }
 
 type Model struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID               string `json:"id"`
+	Object           string `json:"object"`
+	Created          int64  `json:"created"`
+	OwnedBy          string `json:"owned_by"`
+	MaxContextWindow int    `json:"max_context_window,omitempty"`
 }
 
 type ModelsListResponse struct {

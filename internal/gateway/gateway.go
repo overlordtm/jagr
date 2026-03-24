@@ -324,10 +324,11 @@ func (g *Gateway) modelsHandler(w http.ResponseWriter, r *http.Request) {
 	for _, p := range g.config.Providers {
 		for _, m := range p.Models {
 			modelList = append(modelList, models.Model{
-				ID:      m.Alias,
-				Object:  "model",
-				Created: time.Now().Unix(),
-				OwnedBy: p.Name,
+				ID:               m.Alias,
+				Object:           "model",
+				Created:          time.Now().Unix(),
+				OwnedBy:          p.Name,
+				MaxContextWindow: m.MaxContextWindow,
 			})
 		}
 	}

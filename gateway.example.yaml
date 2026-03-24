@@ -40,8 +40,13 @@ providers:
     models:
       - alias: "default"
         upstream: "anthropic/claude-sonnet-4"
+        max_context_window: 200000
       - alias: "fast"
         upstream: "anthropic/claude-haiku-4"
+        max_context_window: 200000
+      - alias: "summarize"
+        upstream: "google/gemini-flash-1.5"
+        max_context_window: 1000000
 
   - name: local-ollama
     type: openai_compatible
