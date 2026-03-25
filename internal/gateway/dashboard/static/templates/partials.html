@@ -189,9 +189,14 @@
                 <span class="text-xs font-medium text-sky-400">Agent concluded</span>
             </div>
             {{else}}
-            <div class="px-5 py-3 flex items-center gap-2 bg-amber-500/5 border-t border-amber-500/20">
+            <div class="px-5 py-3 flex items-center gap-2 {{if eq $.SessionStatus "active"}}bg-emerald-500/5 border-t border-emerald-500/20{{else}}bg-amber-500/5 border-t border-amber-500/20{{end}}">
+                {{if eq $.SessionStatus "active"}}
+                <svg class="h-4 w-4 text-emerald-400 shrink-0 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                <span class="text-xs font-medium text-emerald-400">Agent is working</span>
+                {{else}}
                 <svg class="h-4 w-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
                 <span class="text-xs font-medium text-amber-400">Agent stopped unexpectedly</span>
+                {{end}}
             </div>
             {{end}}
         </div>

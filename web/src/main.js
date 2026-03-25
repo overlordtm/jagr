@@ -1,4 +1,5 @@
-import "htmx.org";
+import htmx from "htmx.org";
+window.htmx = htmx;
 import { marked } from "marked";
 import "./main.css";
 

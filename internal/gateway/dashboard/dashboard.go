@@ -583,14 +583,21 @@ func (d *Dashboard) messagesPartial(w http.ResponseWriter, r *http.Request) {
 		totalPages = 1
 	}
 
+	session, _ := d.store.GetSession(sessionID)
+	sessionStatus := ""
+	if session != nil {
+		sessionStatus = session.Status
+	}
+
 	d.render(w, "messages_partial", map[string]any{
-		"Messages":   messages,
-		"SortMode":   sortMode,
-		"Page":       page,
-		"TotalPages": totalPages,
-		"Total":      total,
-		"AgentID":    agentID,
-		"SessionID":  sessionID,
+		"Messages":      messages,
+		"SortMode":      sortMode,
+		"Page":          page,
+		"TotalPages":    totalPages,
+		"Total":         total,
+		"AgentID":       agentID,
+		"SessionID":     sessionID,
+		"SessionStatus": sessionStatus,
 	})
 }
 

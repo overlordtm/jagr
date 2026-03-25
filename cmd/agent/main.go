@@ -112,10 +112,19 @@ func main() {
 
 			logger.Info("Clean Room initialized", zap.String("work_dir", cleanRoom.WorkDir))
 
-			// Create agent instance
-			ag, err := agent.NewAgent(
+			// Create gateway client
+			gw := agent.NewGatewayClient(
 				gatewayURL,
 				apiKey,
+				hostname,
+				model,
+				logger,
+				tlsSkipVerify,
+				time.Duration(httpTimeoutSec)*time.Second,
+			)
+
+			// Create harness
+			harness := agent.NewJagrHarness(
 				mode,
 				maxIterations,
 				maxToolFailures,
@@ -123,15 +132,11 @@ func main() {
 				objective,
 				outputDir,
 				logger,
+				gw,
 				cleanRoom,
-				tlsSkipVerify,
-				time.Duration(httpTimeoutSec)*time.Second,
 			)
-			if err != nil {
-				return fmt.Errorf("failed to create agent: %w", err)
-			}
 
-			return ag.Run()
+			return harness.Run()
 		},
 	}
 
