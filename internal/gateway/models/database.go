@@ -32,7 +32,8 @@ type MessageLog struct {
 	TokensOut    int       `json:"tokens_out,omitempty"`
 	CostUSD      float64   `json:"cost_usd,omitempty"`
 	LatencyMs    int       `json:"latency_ms,omitempty"`
-	SubAgentRole string    `json:"sub_agent_role,omitempty"`
+	AgentRole    string    `json:"agent_role,omitempty"`
+	AgentName    string    `json:"agent_name,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 

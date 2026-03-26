@@ -6,7 +6,8 @@ type Message struct {
 	Name         string     `json:"name,omitempty"`
 	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID   string     `json:"tool_call_id,omitempty"`
-	SubAgentRole string     `json:"sub_agent_role,omitempty"`
+	AgentRole    string     `json:"agent_role,omitempty"`
+	AgentName    string     `json:"agent_name,omitempty"`
 }
 
 type ToolCall struct {

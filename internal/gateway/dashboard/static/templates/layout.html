@@ -218,27 +218,45 @@ function switchAgentTab(btn, tab) {
 <!-- Messages Tab -->
 <div id="tab-messages" class="session-tab-content">
 <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-    <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
-        <h2 class="text-base font-semibold text-white">Messages</h2>
-        <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
-            <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
-                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&page=1"
-                    hx-target="#messages-list"
-                    hx-swap="innerHTML"
-                    data-sort="chronological">
-                Chronological
-            </button>
-            <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
-                    hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent&page=1"
-                    hx-target="#messages-list"
-                    hx-swap="innerHTML"
-                    data-sort="agent">
-                By Agent
-            </button>
+    <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <h2 class="text-base font-semibold text-white shrink-0">Messages</h2>
+        <div class="flex items-center gap-3 flex-wrap justify-end">
+            {{if and .AgentRoles (gt (len .AgentRoles) 1)}}
+            <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
+                <button class="msg-agent-filter-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
+                        hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&agent=&page=1"
+                        hx-target="#messages-list"
+                        hx-swap="innerHTML"
+                        data-agent="">All</button>
+                {{range .AgentRoles}}
+                <button class="msg-agent-filter-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
+                        hx-get="/partials/agents/{{$.Agent.ID}}/sessions/{{$.Session.ID}}/messages?sort=chronological&agent={{.}}&page=1"
+                        hx-target="#messages-list"
+                        hx-swap="innerHTML"
+                        data-agent="{{.}}">{{.}}</button>
+                {{end}}
+            </div>
+            {{end}}
+            <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
+                <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
+                        hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&agent=&page=1"
+                        hx-target="#messages-list"
+                        hx-swap="innerHTML"
+                        data-sort="chronological">
+                    Chronological
+                </button>
+                <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
+                        hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent&agent=&page=1"
+                        hx-target="#messages-list"
+                        hx-swap="innerHTML"
+                        data-sort="agent">
+                    By Agent
+                </button>
+            </div>
         </div>
     </div>
     <div id="messages-list"
-         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&page=1"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&agent=&page=1"
          {{if eq .Session.Status "active"}}hx-trigger="load, every 5s [isLiveRefreshEnabled()]"{{else}}hx-trigger="load"{{end}}
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>

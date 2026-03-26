@@ -13,19 +13,19 @@ import (
 // AiAgent runs a think→act→observe loop, communicating with the LLM via GatewayClient.
 // It is the only component that talks to the LLM API.
 type AiAgent struct {
-	harness        *JagrHarness
-	name           string
-	role           string
-	systemPrompt   string
-	objective      string
-	context        *ContextMagic
-	iterations     int
-	maxIter        int // 0 means resolve from profile/harness defaults
-	concluded      bool
-	tools          []Tool
-	toolbox        *ToolBox
-	gateway        *GatewayClient
-	findingsStore  *FindingsStore
+	harness          *JagrHarness
+	name             string
+	role             string
+	systemPrompt     string
+	objective        string
+	context          *ContextMagic
+	iterations       int
+	maxIter          int // 0 means resolve from profile/harness defaults
+	concluded        bool
+	tools            []Tool
+	toolbox          *ToolBox
+	gateway          *GatewayClient
+	findingsStore    *FindingsStore
 	investigatorWg   sync.WaitGroup
 	delegatedTargets map[string]bool
 	lastPromptTokens int
@@ -89,16 +89,6 @@ func (a *AiAgent) Run() error {
 
 		for _, tc := range toolCalls {
 			a.harness.logger.Info("AiAgent Tool call", zap.String("name", a.name), zap.String("tool", tc.Function.Name))
-		}
-
-		// Interactive mode
-		if a.harness.mode == "interactive" {
-			if approved, hint := a.harness.promptOperator(toolCalls); !approved {
-				if hint != "" {
-					a.context.Append(Message{Role: "user", Content: hint})
-				}
-				continue
-			}
 		}
 
 		results, err := a.act(toolCalls)
@@ -223,7 +213,7 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 
 	reqBytes, _ := json.Marshal(reqBody)
 
-	reply, err := a.gateway.ChatCompletion(reqBytes, a.role)
+	reply, err := a.gateway.ChatCompletion(reqBytes, a.role, a.name)
 	if err != nil {
 		// If the error looks like a context-length overflow, try compacting and retrying once.
 		if strings.Contains(err.Error(), "context length") || strings.Contains(err.Error(), "maximum context") {
@@ -249,7 +239,7 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 			}
 			reqBody["messages"] = messages
 			reqBytes, _ = json.Marshal(reqBody)
-			reply, err = a.gateway.ChatCompletion(reqBytes, a.role)
+			reply, err = a.gateway.ChatCompletion(reqBytes, a.role, a.name)
 			if err != nil {
 				return nil, fmt.Errorf("gateway request failed after compaction: %w", err)
 			}
@@ -378,7 +368,7 @@ func (a *AiAgent) compactHistory() error {
 	}
 
 	reqBytes, _ := json.Marshal(summaryReq)
-	reply, err := a.gateway.ChatCompletion(reqBytes, a.role+"-compactor")
+	reply, err := a.gateway.ChatCompletion(reqBytes, a.role+"-compactor", a.name)
 	if err != nil {
 		return fmt.Errorf("gateway request for summary failed: %w", err)
 	}

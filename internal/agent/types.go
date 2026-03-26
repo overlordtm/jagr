@@ -63,7 +63,6 @@ type ReportMetadata struct {
 	Hostname    string    `json:"hostname"`
 	StartTime   time.Time `json:"start_time"`
 	EndTime     time.Time `json:"end_time"`
-	Mode        string    `json:"mode"`
 	Model       string    `json:"model"`
 	Iterations  int       `json:"iterations"`
 	TotalTokens int       `json:"total_tokens,omitempty"`

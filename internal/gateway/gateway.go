@@ -244,18 +244,20 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Read sub-agent role from header (empty for main agent)
-	subAgentRole := r.Header.Get("X-Sub-Agent-Role")
+	// Read agent role and name from headers (empty for main agent)
+	agentRole := r.Header.Get("X-Agent-Role")
+	agentName := r.Header.Get("X-Agent-Name")
 
 	// Store only NEW incoming messages in DB for dashboard visibility.
 	// The agent sends the full conversation each time, so skip messages
-	// we already have stored. Count is scoped per sub-agent role because
-	// each sub-agent maintains its own independent conversation.
-	existingCount, _ := g.store.GetMessageCountByRole(sessionID, subAgentRole)
+	// we already have stored. Count is scoped per agent role because
+	// each agent maintains its own independent conversation.
+	existingCount, _ := g.store.GetMessageCountByRole(sessionID, agentRole)
 	if len(req.Messages) > existingCount {
 		for _, msg := range req.Messages[existingCount:] {
 			if msg.Role != "assistant" {
-				msg.SubAgentRole = subAgentRole
+				msg.AgentRole = agentRole
+				msg.AgentName = agentName
 				g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0)
 			}
 		}
@@ -328,13 +330,14 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	g.store.AppendMessage(sessionID, &models.Message{
-		Role:         "assistant",
-		Content:      resp.Choices[0].Message.Content,
-		ToolCalls:    resp.Choices[0].Message.ToolCalls,
-		SubAgentRole: subAgentRole,
+		Role:      "assistant",
+		Content:   resp.Choices[0].Message.Content,
+		ToolCalls: resp.Choices[0].Message.ToolCalls,
+		AgentRole: agentRole,
+		AgentName: agentName,
 	}, resp.Model, tokensIn, tokensOut, costUSD, int(latency))
 
-	g.store.UpdateAgentConfigUpstream(sessionID, subAgentRole, req.Model, resp.Model, g.config.Providers[0].Name)
+	g.store.UpdateAgentConfigUpstream(sessionID, agentRole, req.Model, resp.Model, g.config.Providers[0].Name)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -592,13 +595,14 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 			g.mu.Unlock()
 		}
 		g.store.AppendMessage(sessionID, &models.Message{
-			Role:         "assistant",
-			Content:      resp.Choices[0].Message.Content,
-			ToolCalls:    resp.Choices[0].Message.ToolCalls,
-			SubAgentRole: r.Header.Get("X-Sub-Agent-Role"),
+			Role:      "assistant",
+			Content:   resp.Choices[0].Message.Content,
+			ToolCalls: resp.Choices[0].Message.ToolCalls,
+			AgentRole: r.Header.Get("X-Agent-Role"),
+			AgentName: r.Header.Get("X-Agent-Name"),
 		}, resp.Model, tokensIn, tokensOut, costUSD, int(latency))
 
-		g.store.UpdateAgentConfigUpstream(sessionID, r.Header.Get("X-Sub-Agent-Role"), req.Model, resp.Model, g.config.Providers[0].Name)
+		g.store.UpdateAgentConfigUpstream(sessionID, r.Header.Get("X-Agent-Role"), req.Model, resp.Model, g.config.Providers[0].Name)
 	}
 }
 

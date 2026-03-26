@@ -147,12 +147,13 @@ func (gc *GatewayClient) doRequest(req *http.Request, reqBody []byte) (*http.Res
 }
 
 // ChatCompletion sends a chat completion request to the gateway and returns the decoded response.
-func (gc *GatewayClient) ChatCompletion(reqBytes []byte, role string) (map[string]any, error) {
+func (gc *GatewayClient) ChatCompletion(reqBytes []byte, role, name string) (map[string]any, error) {
 	req, _ := http.NewRequest("POST", gc.gatewayURL+"/v1/chat/completions", strings.NewReader(string(reqBytes)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
 	req.Header.Set("X-Hostname", gc.hostname)
-	req.Header.Set("X-Sub-Agent-Role", role)
+	req.Header.Set("X-Agent-Role", role)
+	req.Header.Set("X-Agent-Name", name)
 
 	resp, err := gc.doRequest(req, reqBytes)
 	if err != nil {

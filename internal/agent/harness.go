@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,7 +16,6 @@ import (
 // JagrHarness orchestrates the multi-phase security investigation.
 // It spawns and manages AiAgents, collects findings, and generates reports.
 type JagrHarness struct {
-	mode            string
 	maxIter         int
 	maxToolFailures int
 	model           string
@@ -37,7 +35,6 @@ type JagrHarness struct {
 // NewJagrHarness creates a new JagrHarness for orchestrating an investigation.
 func NewJagrHarness(mode string, maxIter, maxToolFailures int, model, objective, outputDir string, logger *zap.Logger, gateway *GatewayClient, cleanRoom *CleanRoom) *JagrHarness {
 	return &JagrHarness{
-		mode:            mode,
 		maxIter:         maxIter,
 		maxToolFailures: maxToolFailures,
 		model:           model,
@@ -149,7 +146,7 @@ func (h *JagrHarness) Run() error {
 }
 
 // defaultInvestigatorMaxIter is the fallback cap for investigator agents.
-const defaultInvestigatorMaxIter = 10
+const defaultInvestigatorMaxIter = 50
 
 func (h *JagrHarness) runInvestigator(target, contextStr string) error {
 	name := fmt.Sprintf("investigator-%d", atomic.AddInt64(&h.investigatorCounter, 1))
@@ -206,30 +203,6 @@ func (h *JagrHarness) collectHostContext() string {
 	return strings.Join(sections, "\n\n")
 }
 
-// promptOperator presents proposed tool calls to the operator and waits for approval.
-func (h *JagrHarness) promptOperator(toolCalls []ToolCall) (bool, string) {
-	fmt.Println("\n--- Proposed Actions ---")
-	for i, tc := range toolCalls {
-		fmt.Printf("[%d] %s(%s)\n", i+1, tc.Function.Name, tc.Function.Arguments)
-	}
-	fmt.Print("\nApprove? [y]es / [n]o / [h]int: ")
-
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		return false, ""
-	}
-
-	input := strings.TrimSpace(strings.ToLower(scanner.Text()))
-	switch {
-	case input == "y" || input == "yes" || input == "":
-		return true, ""
-	case input == "n" || input == "no":
-		return false, ""
-	default:
-		return false, input
-	}
-}
-
 func (h *JagrHarness) generateReports(summary string) error {
 	tokensIn, tokensOut := h.gateway.GetTokenUsage()
 	report := Report{
@@ -240,7 +213,6 @@ func (h *JagrHarness) generateReports(summary string) error {
 			Hostname:    h.gateway.Hostname(),
 			StartTime:   h.startTime,
 			EndTime:     time.Now(),
-			Mode:        h.mode,
 			Model:       h.model,
 			TotalTokens: tokensIn + tokensOut,
 		},

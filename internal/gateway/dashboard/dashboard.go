@@ -227,7 +227,7 @@ func init() {
 			order := []string{}
 			byRole := map[string]*messageGroup{}
 			for _, m := range messages {
-				role := m.SubAgentRole
+				role := m.AgentRole
 				if role == "" {
 					role = "main"
 				}
@@ -451,6 +451,7 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 	findingCount, _ := d.store.GetSessionFindingCount(sessionID)
 	hasReport, _ := d.store.HasReport(sessionID)
 	upstreamModel, _ := d.store.GetSessionUpstreamModel(sessionID)
+	agentRoles, _ := d.store.GetSessionAgentRoles(sessionID)
 
 	d.render(w, "layout", map[string]any{
 		"Page":          "session",
@@ -460,6 +461,7 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 		"FindingCount":  findingCount,
 		"HasReport":     hasReport,
 		"UpstreamModel": upstreamModel,
+		"AgentRoles":    agentRoles,
 	})
 }
 
@@ -566,13 +568,15 @@ func (d *Dashboard) messagesPartial(w http.ResponseWriter, r *http.Request) {
 		sortMode = "chronological"
 	}
 
+	agentFilter := r.URL.Query().Get("agent")
+
 	page := 1
 	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
 		page = p
 	}
 	const perPage = 50
 
-	messages, total, err := d.store.GetSessionMessagesPaginated(sessionID, perPage, (page-1)*perPage)
+	messages, total, err := d.store.GetSessionMessagesPaginatedFiltered(sessionID, agentFilter, perPage, (page-1)*perPage)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -589,9 +593,13 @@ func (d *Dashboard) messagesPartial(w http.ResponseWriter, r *http.Request) {
 		sessionStatus = session.Status
 	}
 
+	agentRoles, _ := d.store.GetSessionAgentRoles(sessionID)
+
 	d.render(w, "messages_partial", map[string]any{
 		"Messages":      messages,
 		"SortMode":      sortMode,
+		"AgentFilter":   agentFilter,
+		"AgentRoles":    agentRoles,
 		"Page":          page,
 		"TotalPages":    totalPages,
 		"Total":         total,

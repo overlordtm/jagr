@@ -110,7 +110,7 @@
 <div class="px-5 py-4 hover:bg-gray-800/20 transition-colors">
     <div class="flex items-center flex-wrap gap-2 mb-2">
         <span class="inline-flex items-center rounded-md px-2 py-1 text-xs font-semibold {{roleColor .Role}}">{{.Role}}</span>
-        {{if .SubAgentRole}}<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{agentColor .SubAgentRole}}">{{.SubAgentRole}}</span>{{end}}
+        {{if .AgentRole}}<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{agentColor .AgentRole}}">{{.AgentRole}}</span>{{end}}
         {{if .ToolCallID}}<span class="text-xs font-mono text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{shortID .ToolCallID}}</span>{{end}}
         {{if .Model}}<span class="text-xs text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{.Model}}</span>{{end}}
         {{if .TokensIn}}<span class="text-xs text-gray-500 tabular-nums">{{.TokensIn}}+{{.TokensOut}} tok</span>{{end}}
@@ -120,13 +120,24 @@
     </div>
 
     {{if .Content}}
-        {{if isLong .Content}}
-        <details class="pl-1">
-            <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-300 transition-colors">{{truncate .Content 120}}</summary>
-            <div class="msg-content mt-1 text-sm text-gray-300 break-words max-h-96 overflow-y-auto leading-relaxed">{{.Content}}</div>
-        </details>
+        {{if eq .Role "tool"}}
+            {{if isLong .Content}}
+            <details class="pl-1">
+                <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-300 transition-colors">{{truncate .Content 120}}</summary>
+                <pre class="mt-1 text-sm text-gray-300 bg-gray-950 rounded-md px-3 py-2 max-h-96 overflow-auto whitespace-pre-wrap break-words leading-relaxed">{{.Content}}</pre>
+            </details>
+            {{else}}
+            <pre class="text-sm text-gray-300 bg-gray-950 rounded-md px-3 py-2 whitespace-pre-wrap break-words leading-relaxed ml-1">{{.Content}}</pre>
+            {{end}}
         {{else}}
-        <div class="msg-content text-sm text-gray-300 break-words leading-relaxed pl-1">{{.Content}}</div>
+            {{if isLong .Content}}
+            <details class="pl-1">
+                <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-300 transition-colors">{{truncate .Content 120}}</summary>
+                <div class="msg-content mt-1 text-sm text-gray-300 break-words max-h-96 overflow-y-auto leading-relaxed">{{.Content}}</div>
+            </details>
+            {{else}}
+            <div class="msg-content text-sm text-gray-300 break-words leading-relaxed pl-1">{{.Content}}</div>
+            {{end}}
         {{end}}
     {{end}}
 
@@ -213,7 +224,7 @@
 {{template "messages_pagination" .}}
 {{else}}
 <div class="p-12 text-center">
-    <p class="text-gray-600">No messages in this session.</p>
+    <p class="text-gray-600">{{if .AgentFilter}}No messages from this agent.{{else}}No messages in this session.{{end}}</p>
 </div>
 {{end}}
 {{end}}
@@ -225,7 +236,7 @@
     <div class="flex items-center gap-1">
         {{if gt .Page 1}}
         <button class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors"
-                hx-get="/partials/agents/{{.AgentID}}/sessions/{{.SessionID}}/messages?sort={{.SortMode}}&page={{subtract .Page 1}}"
+                hx-get="/partials/agents/{{.AgentID}}/sessions/{{.SessionID}}/messages?sort={{.SortMode}}&agent={{.AgentFilter}}&page={{subtract .Page 1}}"
                 hx-target="#messages-list"
                 hx-swap="innerHTML">
             Previous
@@ -237,7 +248,7 @@
         {{end}}
         {{if lt .Page .TotalPages}}
         <button class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors"
-                hx-get="/partials/agents/{{.AgentID}}/sessions/{{.SessionID}}/messages?sort={{.SortMode}}&page={{add .Page 1}}"
+                hx-get="/partials/agents/{{.AgentID}}/sessions/{{.SessionID}}/messages?sort={{.SortMode}}&agent={{.AgentFilter}}&page={{add .Page 1}}"
                 hx-target="#messages-list"
                 hx-swap="innerHTML">
             Next
