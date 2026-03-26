@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,22 @@ func NewStore(dbPath string, log *zap.Logger) (*Store, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// SQLite performance tuning
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",          // write-ahead logging: concurrent reads during writes
+		"PRAGMA synchronous=NORMAL",        // safe with WAL, much faster than FULL
+		"PRAGMA cache_size=-64000",         // 64MB page cache (negative = KiB)
+		"PRAGMA busy_timeout=5000",         // wait up to 5s on lock instead of failing immediately
+		"PRAGMA foreign_keys=ON",           // enforce FK constraints
+		"PRAGMA temp_store=MEMORY",         // keep temp tables in memory
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("setting %s: %w", p, err)
+		}
 	}
 
 	store := &Store{db: db, log: log}

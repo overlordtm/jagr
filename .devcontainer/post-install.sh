@@ -19,7 +19,7 @@ sudo chown -R vscode:vscode "$CLAUDE_DIR"
 # EOF
 
 DEBIAN_FRONTEND=noninteractive sudo apt-get -y update
-DEBIAN_FRONTEND=noninteractive sudo apt-get -y install direnv libncurses-dev libncurses6 libncursesw6
+DEBIAN_FRONTEND=noninteractive sudo apt-get -y install direnv libncurses-dev zstd libncurses6 libncursesw6
 
 # Add direnv hook to .bashrc if not already present
 if ! grep -q 'direnv hook bash' ~/.bashrc; then

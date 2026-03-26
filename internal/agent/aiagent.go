@@ -17,7 +17,7 @@ type AiAgent struct {
 	role           string
 	systemPrompt   string
 	objective      string
-	conversation   []Message
+	context        *ContextMagic
 	iterations     int
 	maxIter        int // 0 means resolve from profile/harness defaults
 	concluded      bool
@@ -44,6 +44,7 @@ func NewAiAgent(harness *JagrHarness, name, role, systemPrompt, objective string
 		toolbox:          NewToolBox(harness.cleanRoom, harness.maxToolFailures, harness.logger),
 		gateway:          harness.gateway,
 		findingsStore:    harness.findingsStore,
+		context:          NewContextMagic(nil),
 		delegatedTargets: make(map[string]bool),
 	}
 }
@@ -54,8 +55,8 @@ func (a *AiAgent) Run() error {
 	defer a.investigatorWg.Wait()
 
 	prompt := a.systemPrompt + "\n\n## Available Tools\n" + a.formatToolsForPrompt()
-	a.conversation = append(a.conversation, Message{Role: "system", Content: prompt})
-	a.conversation = append(a.conversation, Message{Role: "user", Content: a.objective})
+	a.context.Append(Message{Role: "system", Content: prompt})
+	a.context.Append(Message{Role: "user", Content: a.objective})
 
 	iterLimit := a.maxIter
 	if iterLimit == 0 {
@@ -93,7 +94,7 @@ func (a *AiAgent) Run() error {
 		if a.harness.mode == "interactive" {
 			if approved, hint := a.harness.promptOperator(toolCalls); !approved {
 				if hint != "" {
-					a.conversation = append(a.conversation, Message{Role: "user", Content: hint})
+					a.context.Append(Message{Role: "user", Content: hint})
 				}
 				continue
 			}
@@ -144,7 +145,7 @@ func (a *AiAgent) Run() error {
 
 func (a *AiAgent) gatherPartialEvidence() []string {
 	var evidence []string
-	for _, msg := range a.conversation {
+	for _, msg := range a.context.RawHistory() {
 		if msg.Role == "tool" && !strings.Contains(msg.Content, "Error:") && msg.Content != "" {
 			snippet := msg.Content
 			if len(snippet) > 200 {
@@ -167,8 +168,9 @@ func (a *AiAgent) formatToolsForPrompt() string {
 func (a *AiAgent) think() ([]ToolCall, error) {
 	a.iterations++
 
-	messages := make([]map[string]any, len(a.conversation))
-	for i, m := range a.conversation {
+	contextMessages := a.context.Messages()
+	messages := make([]map[string]any, len(contextMessages))
+	for i, m := range contextMessages {
 		msg := map[string]any{
 			"role":    m.Role,
 			"content": m.Content,
@@ -229,8 +231,9 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 				return nil, fmt.Errorf("context overflow and compaction failed: %w (original: %v)", compactErr, err)
 			}
 			// Rebuild messages from compacted conversation and retry
-			messages = make([]map[string]any, len(a.conversation))
-			for i, m := range a.conversation {
+			contextMessages = a.context.Messages()
+			messages = make([]map[string]any, len(contextMessages))
+			for i, m := range contextMessages {
 				msg := map[string]any{
 					"role":    m.Role,
 					"content": m.Content,
@@ -285,7 +288,7 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 						})
 					}
 				}
-				a.conversation = append(a.conversation, Message{
+				a.context.Append(Message{
 					Role:      "assistant",
 					Content:   content,
 					ToolCalls: parsedCalls,
@@ -293,7 +296,7 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 				return parsedCalls, nil
 			}
 
-			a.conversation = append(a.conversation, Message{
+			a.context.Append(Message{
 				Role:    "assistant",
 				Content: content,
 			})
@@ -314,7 +317,7 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 
 func (a *AiAgent) estimateTokens() int {
 	total := 0
-	for _, m := range a.conversation {
+	for _, m := range a.context.RawHistory() {
 		total += len(m.Content) / 4
 		for _, tc := range m.ToolCalls {
 			total += len(tc.Function.Arguments) / 4
@@ -349,19 +352,20 @@ func (a *AiAgent) needsCompaction() bool {
 func (a *AiAgent) compactHistory() error {
 	a.harness.logger.Info("Context window nearing limit, compacting history", zap.String("name", a.name), zap.Int("lastPromptTokens", a.lastPromptTokens))
 
-	if len(a.conversation) <= 5 {
+	history := a.context.RawHistory()
+	if len(history) <= 5 {
 		return nil
 	}
 
 	keepFront := 2
 	keepBack := 3
-	compactLen := len(a.conversation) - keepFront - keepBack
+	compactLen := len(history) - keepFront - keepBack
 
 	if compactLen <= 0 {
 		return nil
 	}
 
-	messagesToCompact := a.conversation[keepFront : keepFront+compactLen]
+	messagesToCompact := history[keepFront : keepFront+compactLen]
 	compactBytes, _ := json.Marshal(messagesToCompact)
 
 	summaryReq := map[string]any{
@@ -391,16 +395,16 @@ func (a *AiAgent) compactHistory() error {
 	}
 
 	var newConv []Message
-	newConv = append(newConv, a.conversation[:keepFront]...)
+	newConv = append(newConv, history[:keepFront]...)
 	newConv = append(newConv, Message{
 		Role:    "system",
 		Content: "Prior history was compacted to prevent context overflow. Here is the summary of prior events:\n\n" + summary,
 	})
-	newConv = append(newConv, a.conversation[len(a.conversation)-keepBack:]...)
+	newConv = append(newConv, history[len(history)-keepBack:]...)
 
-	a.conversation = newConv
+	a.context.SetHistory(newConv)
 	a.lastPromptTokens = 0
-	a.harness.logger.Info("History compaction successful", zap.Int("new_conversation_length", len(a.conversation)))
+	a.harness.logger.Info("History compaction successful", zap.Int("new_conversation_length", a.context.Len()))
 
 	return nil
 }
@@ -532,7 +536,7 @@ func (a *AiAgent) executeTool(tc ToolCall) (ToolResult, error) {
 
 func (a *AiAgent) observe(results []ToolResult) error {
 	for _, result := range results {
-		a.conversation = append(a.conversation, Message{
+		a.context.Append(Message{
 			Role:       "tool",
 			Content:    result.Content,
 			Name:       result.Name,
