@@ -671,6 +671,80 @@ func (s *Store) GetSessionUpstreamModel(sessionID string) (string, error) {
 	return model, nil
 }
 
+// --- Memos ---
+
+// CreateMemo inserts a new memo and returns it with the generated ID and timestamp.
+func (s *Store) CreateMemo(exerciseID, sessionID, host, scope, content, memoType string) (*models.Memo, error) {
+	if memoType == "" {
+		memoType = "observation"
+	}
+
+	var memo models.Memo
+	err := s.db.QueryRow(`
+		INSERT INTO memos (exercise_id, session_id, host, scope, content, memo_type)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id, exercise_id, session_id, host, scope, content, memo_type, created_at
+	`, exerciseID, sessionID, host, scope, content, memoType).Scan(
+		&memo.ID, &memo.ExerciseID, &memo.SessionID, &memo.Host,
+		&memo.Scope, &memo.Content, &memo.MemoType, &memo.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &memo, nil
+}
+
+// GetMemos retrieves memos matching the given filters.
+func (s *Store) GetMemos(exerciseID, scope, host, sessionID, since, memoType string, limit int) ([]models.Memo, error) {
+	query := `SELECT id, exercise_id, session_id, host, scope, content, memo_type, created_at FROM memos WHERE exercise_id = ?`
+	args := []any{exerciseID}
+
+	if scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, scope)
+	}
+	if host != "" {
+		query += ` AND host = ?`
+		args = append(args, host)
+	}
+	if sessionID != "" {
+		query += ` AND session_id = ?`
+		args = append(args, sessionID)
+	}
+	if since != "" {
+		query += ` AND created_at >= ?`
+		args = append(args, since)
+	}
+	if memoType != "" {
+		query += ` AND memo_type = ?`
+		args = append(args, memoType)
+	}
+
+	query += ` ORDER BY created_at ASC`
+
+	if limit <= 0 {
+		limit = 50
+	}
+	query += ` LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memos []models.Memo
+	for rows.Next() {
+		var m models.Memo
+		if err := rows.Scan(&m.ID, &m.ExerciseID, &m.SessionID, &m.Host, &m.Scope, &m.Content, &m.MemoType, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		memos = append(memos, m)
+	}
+	return memos, rows.Err()
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/overlordtm/jagr/internal/agent/enrichment"
 	"go.uber.org/zap"
 )
 
@@ -76,9 +77,31 @@ func (tb *ToolBox) ExecuteTool(tc ToolCall) (ToolResult, error) {
 		return tb.execSearchFiles(tc, args)
 	case "get_network_info":
 		return tb.execGetNetworkInfo(tc, args)
+	case "check_cron":
+		return tb.execEnrichment(tc, enrichment.EnrichCron)
+	case "check_users":
+		return tb.execEnrichment(tc, enrichment.EnrichUsers)
+	case "check_systemd":
+		return tb.execEnrichment(tc, enrichment.EnrichSystemd)
+	case "check_suid":
+		return tb.execEnrichment(tc, enrichment.EnrichSUID)
+	case "check_modules":
+		return tb.execEnrichment(tc, enrichment.EnrichModules)
+	case "check_listeners":
+		return tb.execEnrichment(tc, enrichment.EnrichListeners)
 	default:
 		return ToolResult{}, fmt.Errorf("unknown tool: %s", tc.Function.Name)
 	}
+}
+
+// execEnrichment runs a Go-side enrichment parser and returns its formatted output.
+func (tb *ToolBox) execEnrichment(tc ToolCall, fn func(enrichment.Runner) string) (ToolResult, error) {
+	output := fn(tb.cleanRoom)
+	return ToolResult{
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
+		Content: output,
+	}, nil
 }
 
 func (tb *ToolBox) execExecuteTrusted(tc ToolCall, args map[string]any) (ToolResult, error) {

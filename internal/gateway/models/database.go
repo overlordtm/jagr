@@ -76,3 +76,15 @@ type SessionAgentConfig struct {
 	TopK        int       `json:"top_k"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+// Memo represents a persistent note written by an agent.
+type Memo struct {
+	ID         string    `json:"id"`
+	ExerciseID string    `json:"exercise_id"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Host       string    `json:"host,omitempty"`
+	Scope      string    `json:"scope"`
+	Content    string    `json:"content"`
+	MemoType   string    `json:"memo_type"`
+	CreatedAt  time.Time `json:"created_at"`
+}

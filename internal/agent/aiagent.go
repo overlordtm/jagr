@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -398,7 +399,7 @@ func (a *AiAgent) compactHistory() error {
 	newConv = append(newConv, history[:keepFront]...)
 	newConv = append(newConv, Message{
 		Role:    "system",
-		Content: "Prior history was compacted to prevent context overflow. Here is the summary of prior events:\n\n" + summary,
+		Content: "Prior history was compacted to prevent context overflow. Here is the summary of prior events:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
 	})
 	newConv = append(newConv, history[len(history)-keepBack:]...)
 
@@ -413,7 +414,10 @@ func (a *AiAgent) act(toolCalls []ToolCall) ([]ToolResult, error) {
 	var results []ToolResult
 
 	for _, tc := range toolCalls {
+		start := time.Now()
 		result, err := a.executeTool(tc)
+		elapsed := time.Since(start)
+
 		if err != nil {
 			count := a.toolbox.IncrementFailure(tc.Function.Name)
 			a.harness.logger.Warn("Tool call failed",
@@ -428,12 +432,14 @@ func (a *AiAgent) act(toolCalls []ToolCall) ([]ToolResult, error) {
 			}
 
 			results = append(results, ToolResult{
-				ToolID:  tc.ID,
-				Name:    tc.Function.Name,
-				Content: fmt.Sprintf("Error: %v", err),
-				IsError: true,
+				ToolID:   tc.ID,
+				Name:     tc.Function.Name,
+				Content:  fmt.Sprintf("Error: %v", err),
+				IsError:  true,
+				Duration: elapsed,
 			})
 		} else {
+			result.Duration = elapsed
 			a.toolbox.ResetFailure(tc.Function.Name)
 			results = append(results, result)
 		}
@@ -529,16 +535,101 @@ func (a *AiAgent) executeTool(tc ToolCall) (ToolResult, error) {
 			Content: fmt.Sprintf("Finding %s submitted successfully. If you have no more findings, call conclude.", stored.ID),
 		}, nil
 
+	case "query_knowledge_base":
+		return a.executeQueryKnowledgeBase(tc)
+
+	case "write_memo":
+		return a.executeWriteMemo(tc)
+
+	case "read_memos":
+		return a.executeReadMemos(tc)
+
 	default:
 		return a.toolbox.ExecuteTool(tc)
 	}
 }
 
+func (a *AiAgent) executeQueryKnowledgeBase(tc ToolCall) (ToolResult, error) {
+	args, err := ParseToolArguments(tc.Function.Arguments)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("failed to parse args: %w", err)
+	}
+	query, _ := args["query"].(string)
+	collection, _ := args["collection"].(string)
+	topK := 5
+	if tk, ok := args["top_k"].(float64); ok && tk > 0 {
+		topK = int(tk)
+	}
+
+	resp, err := a.gateway.QueryKnowledgeBase(query, collection, topK)
+	if err != nil {
+		return ToolResult{}, err
+	}
+
+	return ToolResult{
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
+		Content: resp,
+	}, nil
+}
+
+func (a *AiAgent) executeWriteMemo(tc ToolCall) (ToolResult, error) {
+	args, err := ParseToolArguments(tc.Function.Arguments)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("failed to parse args: %w", err)
+	}
+	scope, _ := args["scope"].(string)
+	content, _ := args["content"].(string)
+	memoType, _ := args["memo_type"].(string)
+	if memoType == "" {
+		memoType = "observation"
+	}
+
+	resp, err := a.gateway.WriteMemo(scope, content, memoType, "")
+	if err != nil {
+		return ToolResult{}, err
+	}
+
+	return ToolResult{
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
+		Content: fmt.Sprintf("Memo written (scope: %s). %s", scope, resp),
+	}, nil
+}
+
+func (a *AiAgent) executeReadMemos(tc ToolCall) (ToolResult, error) {
+	args, err := ParseToolArguments(tc.Function.Arguments)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("failed to parse args: %w", err)
+	}
+	scope, _ := args["scope"].(string)
+
+	var since string
+	if sinceMin, ok := args["since_minutes"].(float64); ok && sinceMin > 0 {
+		since = time.Now().Add(-time.Duration(sinceMin) * time.Minute).UTC().Format(time.RFC3339)
+	}
+
+	resp, err := a.gateway.ReadMemos(scope, "", since, "", 50)
+	if err != nil {
+		return ToolResult{}, err
+	}
+
+	return ToolResult{
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
+		Content: resp,
+	}, nil
+}
+
 func (a *AiAgent) observe(results []ToolResult) error {
 	for _, result := range results {
+		// Apply truncation and wrapping to tool output
+		content := TruncateToolOutput(result.Name, result.Content)
+		content = WrapToolResult(result.Name, content, result.Duration)
+
 		a.context.Append(Message{
 			Role:       "tool",
-			Content:    result.Content,
+			Content:    content,
 			Name:       result.Name,
 			ToolCallID: result.ToolID,
 		})

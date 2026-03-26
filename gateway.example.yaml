@@ -75,6 +75,18 @@ logging:
   level: info
   audit: true
 
+# Knowledge base (RAG) for exercise documentation retrieval.
+# When configured, agents can query baseline configs, network maps, and manuals.
+# Ingest documents with: jagr-gateway ingest --collection default /path/to/docs/
+# knowledge:
+#   backend: chromem          # "chromem" (embedded, default) or "redis"
+#   data_dir: /var/lib/jagr/knowledge  # persistent storage path (empty = in-memory)
+#   embedding:
+#     provider: openai_compatible  # "openai", "openai_compatible", "ollama"
+#     model: text-embedding-3-small
+#     base_url: https://openrouter.ai/api/v1
+#     api_key: ${OPENROUTER_API_KEY}
+
 agents:
   # Examples of agent profile configurations
   phase_UserAccess:

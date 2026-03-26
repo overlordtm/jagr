@@ -22,6 +22,15 @@ func TestGetAvailableTools(t *testing.T) {
 		"submit_finding",
 		"delegate_investigation",
 		"conclude",
+		"check_cron",
+		"check_users",
+		"check_systemd",
+		"check_suid",
+		"check_modules",
+		"check_listeners",
+		"write_memo",
+		"read_memos",
+		"query_knowledge_base",
 	}
 	
 	if len(tools) != len(expectedTools) {

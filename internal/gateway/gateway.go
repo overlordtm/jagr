@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/overlordtm/jagr/internal/gateway/dashboard"
 	"github.com/overlordtm/jagr/internal/gateway/db"
+	"github.com/overlordtm/jagr/internal/gateway/knowledge"
 	"github.com/overlordtm/jagr/internal/gateway/models"
 	"github.com/overlordtm/jagr/internal/gateway/provider"
 )
@@ -22,6 +24,7 @@ type Gateway struct {
 	log         *zap.Logger
 	provider    provider.Provider
 	config      *models.Config
+	kb          knowledge.Store
 
 	mu          sync.RWMutex
 	// tracks per-session token usage for budget enforcement
@@ -41,11 +44,30 @@ func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
 		return nil, err
 	}
 
+	var kbCfg *knowledge.Config
+	if config.Knowledge != nil {
+		kbCfg = &knowledge.Config{
+			Backend: config.Knowledge.Backend,
+			DataDir: config.Knowledge.DataDir,
+			Embedding: knowledge.EmbeddingConfig{
+				Provider: config.Knowledge.Embedding.Provider,
+				Model:    config.Knowledge.Embedding.Model,
+				BaseURL:  config.Knowledge.Embedding.BaseURL,
+				APIKey:   config.Knowledge.Embedding.APIKey,
+			},
+		}
+	}
+	kb, err := knowledge.NewStore(kbCfg)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge store: %w", err)
+	}
+
 	return &Gateway{
 		store:       store,
 		log:         log,
 		provider:    p,
 		config:      config,
+		kb:          kb,
 		tokenCounts: make(map[string]int),
 		rateLimiter: provider.NewRateLimiter(config.RateLimit.RequestsPerMinute, config.RateLimit.MaxConcurrent),
 	}, nil
@@ -116,6 +138,12 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/v1/findings/status", g.updateFindingStatusHandler).Methods("PATCH")
 	router.HandleFunc("/v1/report", g.submitReportHandler).Methods("POST")
 	router.HandleFunc("/v1/agent-settings", g.submitAgentSettingsHandler).Methods("POST")
+	router.HandleFunc("/v1/memos", g.createMemoHandler).Methods("POST")
+	router.HandleFunc("/v1/memos", g.getMemosHandler).Methods("GET")
+	router.HandleFunc("/v1/knowledge/query", g.knowledgeQueryHandler).Methods("POST")
+	router.HandleFunc("/v1/knowledge/ingest", g.knowledgeIngestHandler).Methods("POST")
+	router.HandleFunc("/v1/knowledge/collections", g.knowledgeCollectionsHandler).Methods("GET")
+	router.HandleFunc("/v1/knowledge/collections/{name}", g.knowledgeDeleteCollectionHandler).Methods("DELETE")
 
 	router.HandleFunc("/admin/agents", g.adminAgentsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions", g.adminSessionsHandler).Methods("GET")
@@ -785,6 +813,238 @@ func (g *Gateway) submitAgentSettingsHandler(w http.ResponseWriter, r *http.Requ
 	g.log.Info("Agent settings submitted", zap.String("hostname", agent.Hostname), zap.Int("count", len(req.Agents)))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "count": len(req.Agents)})
+}
+
+// --- Knowledge Base (RAG) ---
+
+func (g *Gateway) knowledgeQueryHandler(w http.ResponseWriter, r *http.Request) {
+	_, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Collection string            `json:"collection"`
+		Query      string            `json:"query"`
+		TopK       int               `json:"top_k"`
+		Where      map[string]string `json:"where,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Query == "" {
+		http.Error(w, "query is required", http.StatusBadRequest)
+		return
+	}
+	if req.Collection == "" {
+		req.Collection = "default"
+	}
+	if req.TopK <= 0 {
+		req.TopK = 5
+	}
+
+	results, err := g.kb.Query(r.Context(), req.Collection, req.Query, req.TopK, req.Where)
+	if err != nil {
+		g.log.Error("Knowledge query failed", zap.Error(err))
+		http.Error(w, "knowledge query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"results": results,
+		"count":   len(results),
+	})
+}
+
+func (g *Gateway) knowledgeIngestHandler(w http.ResponseWriter, r *http.Request) {
+	_, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		Collection string `json:"collection"`
+		Documents  []struct {
+			ID       string            `json:"id"`
+			Content  string            `json:"content"`
+			Metadata map[string]string `json:"metadata,omitempty"`
+		} `json:"documents"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Documents) == 0 {
+		http.Error(w, "documents array is required", http.StatusBadRequest)
+		return
+	}
+	if req.Collection == "" {
+		req.Collection = "default"
+	}
+
+	docs := make([]knowledge.Document, len(req.Documents))
+	for i, d := range req.Documents {
+		id := d.ID
+		if id == "" {
+			id = fmt.Sprintf("doc-%d", i)
+		}
+		docs[i] = knowledge.Document{
+			ID:       id,
+			Content:  d.Content,
+			Metadata: d.Metadata,
+		}
+	}
+
+	if err := g.kb.AddDocuments(r.Context(), req.Collection, docs); err != nil {
+		g.log.Error("Knowledge ingest failed", zap.Error(err))
+		http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	g.log.Info("Knowledge documents ingested",
+		zap.String("collection", req.Collection),
+		zap.Int("count", len(docs)))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":     "ok",
+		"collection": req.Collection,
+		"count":      len(docs),
+	})
+}
+
+func (g *Gateway) knowledgeCollectionsHandler(w http.ResponseWriter, r *http.Request) {
+	_, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	names, err := g.kb.ListCollections(r.Context())
+	if err != nil {
+		g.log.Error("Failed to list collections", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"collections": names})
+}
+
+func (g *Gateway) knowledgeDeleteCollectionHandler(w http.ResponseWriter, r *http.Request) {
+	_, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	name := mux.Vars(r)["name"]
+	if err := g.kb.DeleteCollection(r.Context(), name); err != nil {
+		g.log.Error("Failed to delete collection", zap.String("name", name), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// --- Memos ---
+
+func (g *Gateway) createMemoHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		http.Error(w, "no active session", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Scope    string `json:"scope"`
+		Host     string `json:"host"`
+		Content  string `json:"content"`
+		MemoType string `json:"memo_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Scope == "" || req.Content == "" {
+		http.Error(w, "scope and content are required", http.StatusBadRequest)
+		return
+	}
+
+	// Use agent_id as exercise_id (one agent enrollment per exercise/host)
+	exerciseID := agent.ID
+	host := req.Host
+	if host == "" {
+		host = agent.Hostname
+	}
+
+	memo, err := g.store.CreateMemo(exerciseID, session.ID, host, req.Scope, req.Content, req.MemoType)
+	if err != nil {
+		g.log.Error("Failed to create memo", zap.Error(err))
+		http.Error(w, "failed to create memo", http.StatusInternalServerError)
+		return
+	}
+
+	g.log.Debug("Memo created", zap.String("id", memo.ID), zap.String("scope", req.Scope), zap.String("hostname", agent.Hostname))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(memo)
+}
+
+func (g *Gateway) getMemosHandler(w http.ResponseWriter, r *http.Request) {
+	agent, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	session, err := g.store.GetSessionForAgent(agent.ID)
+	if err != nil {
+		http.Error(w, "no active session", http.StatusBadRequest)
+		return
+	}
+
+	q := r.URL.Query()
+	scope := q.Get("scope")
+	host := q.Get("host")
+	since := q.Get("since")
+	memoType := q.Get("memo_type")
+	limit := 50
+	if l := q.Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	exerciseID := agent.ID
+
+	// For agent-scoped memos, filter by session_id
+	sessionFilter := ""
+	if scope == "agent" {
+		sessionFilter = session.ID
+	}
+
+	memos, err := g.store.GetMemos(exerciseID, scope, host, sessionFilter, since, memoType, limit)
+	if err != nil {
+		g.log.Error("Failed to get memos", zap.Error(err))
+		http.Error(w, "failed to get memos", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(memos)
 }
 
 func (g *Gateway) adminLogsHandler(w http.ResponseWriter, r *http.Request) {

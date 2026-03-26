@@ -402,6 +402,165 @@ func (gc *GatewayClient) SubmitAgentSettings() {
 	gc.logger.Info("Agent settings submitted to gateway", zap.Int("count", count))
 }
 
+// WriteMemo creates a memo on the gateway and returns the JSON response.
+func (gc *GatewayClient) WriteMemo(scope, content, memoType, host string) (string, error) {
+	payload := map[string]string{
+		"scope":     scope,
+		"content":   content,
+		"memo_type": memoType,
+	}
+	if host != "" {
+		payload["host"] = host
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", gc.gatewayURL+"/v1/memos", strings.NewReader(string(body)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create memo request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
+	req.Header.Set("X-Hostname", gc.hostname)
+
+	resp, err := gc.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("memo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("memo creation failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// ReadMemos retrieves memos from the gateway matching the given filters.
+func (gc *GatewayClient) ReadMemos(scope, host, since, memoType string, limit int) (string, error) {
+	url := gc.gatewayURL + "/v1/memos?scope=" + scope
+	if host != "" {
+		url += "&host=" + host
+	}
+	if since != "" {
+		url += "&since=" + since
+	}
+	if memoType != "" {
+		url += "&memo_type=" + memoType
+	}
+	if limit > 0 {
+		url += "&limit=" + fmt.Sprintf("%d", limit)
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create read memos request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
+	req.Header.Set("X-Hostname", gc.hostname)
+
+	resp, err := gc.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("read memos request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("read memos failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Parse and format for LLM readability
+	var memos []struct {
+		ID        string `json:"id"`
+		Content   string `json:"content"`
+		MemoType  string `json:"memo_type"`
+		SessionID string `json:"session_id"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(respBody, &memos); err != nil {
+		return string(respBody), nil
+	}
+
+	if len(memos) == 0 {
+		return "No memos found.", nil
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Memos (%d):\n\n", len(memos)))
+	for i, m := range memos {
+		b.WriteString(fmt.Sprintf("%d. [%s] (%s) %s\n   %s\n\n", i+1, m.MemoType, m.CreatedAt, m.ID, m.Content))
+	}
+	return b.String(), nil
+}
+
+// QueryKnowledgeBase performs a semantic search against the gateway's knowledge store.
+func (gc *GatewayClient) QueryKnowledgeBase(query, collection string, topK int) (string, error) {
+	if collection == "" {
+		collection = "default"
+	}
+	if topK <= 0 {
+		topK = 5
+	}
+
+	payload := map[string]any{
+		"query":      query,
+		"collection": collection,
+		"top_k":      topK,
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", gc.gatewayURL+"/v1/knowledge/query", strings.NewReader(string(body)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create KB query request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
+	req.Header.Set("X-Hostname", gc.hostname)
+
+	resp, err := gc.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("KB query request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("KB query failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Parse and format for LLM readability
+	var result struct {
+		Results []struct {
+			ID         string            `json:"id"`
+			Content    string            `json:"content"`
+			Metadata   map[string]string `json:"metadata,omitempty"`
+			Similarity float32           `json:"similarity"`
+		} `json:"results"`
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return string(respBody), nil
+	}
+
+	if result.Count == 0 {
+		return "No relevant knowledge base entries found for this query.", nil
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Knowledge Base Results (%d):\n\n", result.Count))
+	for i, r := range result.Results {
+		b.WriteString(fmt.Sprintf("--- Result %d (similarity: %.3f, id: %s) ---\n", i+1, r.Similarity, r.ID))
+		if len(r.Metadata) > 0 {
+			for k, v := range r.Metadata {
+				b.WriteString(fmt.Sprintf("  %s: %s\n", k, v))
+			}
+		}
+		b.WriteString(r.Content)
+		b.WriteString("\n\n")
+	}
+	return b.String(), nil
+}
+
 // AddTokenUsage adds token usage from a completion response (thread-safe).
 func (gc *GatewayClient) AddTokenUsage(promptTokens, completionTokens int) {
 	gc.mu.Lock()

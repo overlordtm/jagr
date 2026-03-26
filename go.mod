@@ -13,6 +13,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-sqlite3 v1.14.34 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/philippgille/chromem-go v0.7.0 // indirect
 	github.com/pressly/goose/v3 v3.27.0 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect

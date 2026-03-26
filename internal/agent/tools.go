@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Tool defines an available LLM tool for the agent
@@ -27,11 +28,12 @@ type Function struct {
 
 // ToolResult represents the result of executing a tool
 type ToolResult struct {
-	ToolID     string `json:"tool_id"`
-	Name       string `json:"name"`
-	Content    string `json:"content"`
-	IsError    bool   `json:"is_error,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
+	ToolID     string        `json:"tool_id"`
+	Name       string        `json:"name"`
+	Content    string        `json:"content"`
+	IsError    bool          `json:"is_error,omitempty"`
+	ExitCode   int           `json:"exit_code,omitempty"`
+	Duration   time.Duration `json:"-"`
 }
 
 // GetAvailableTools returns the list of tools the agent can use
@@ -227,6 +229,104 @@ func GetAvailableTools() []Tool {
 			},
 		},
 		{
+			Name:        "query_knowledge_base",
+			Description: "Search the exercise knowledge base for relevant documentation, network maps, baseline configurations, and system manuals. Use this to understand what is expected/normal on this system.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Natural language search query describing what you want to know",
+					},
+					"collection": map[string]any{
+						"type":        "string",
+						"description": "Knowledge collection to search (default: 'default')",
+						"default":     "default",
+					},
+					"top_k": map[string]any{
+						"type":        "integer",
+						"description": "Number of results to return (default: 5)",
+						"default":     5,
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			Name:        "check_cron",
+			Description: "Analyze all cron jobs on the system. Returns every cron entry with metadata about the binary it executes (existence, package ownership, file type, timestamps). You must review ALL entries and determine which are suspicious.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "check_users",
+			Description: "Analyze all user accounts with login shells. Returns each user with UID, groups, password aging, SSH authorized_keys count, sudo rules, and home directory status.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "check_systemd",
+			Description: "Analyze custom/modified systemd units in /etc/systemd/system and /run/systemd/system. Returns each unit with ExecStart binary metadata, package ownership, and drop-in override detection.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "check_suid",
+			Description: "Find all SUID/SGID binaries and files with capabilities. Returns each with permissions, package ownership, SHA256 hash, file type, and modification time.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "check_modules",
+			Description: "Analyze loaded kernel modules. Cross-references with on-disk module files, package ownership, module parameters, and dmesg load messages.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "check_listeners",
+			Description: "Analyze all TCP/UDP network listeners. Returns each with process name, PID, binary path, package ownership, command line, and deleted-binary detection.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
+			Name:        "write_memo",
+			Description: "Write a note to remember later. Use 'agent' scope for private notes, 'host' scope to share with other agents on this host, 'exercise' scope for cross-host observations.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"scope": map[string]any{
+						"type":        "string",
+						"enum":        []string{"agent", "host", "exercise"},
+						"description": "Visibility scope: 'agent' (private), 'host' (shared on this host), 'exercise' (all hosts)",
+					},
+					"content": map[string]any{
+						"type":        "string",
+						"description": "The note content. Be concise but specific.",
+					},
+					"memo_type": map[string]any{
+						"type":        "string",
+						"enum":        []string{"observation", "finding_lead", "correlation"},
+						"description": "Type of memo (default: observation)",
+						"default":     "observation",
+					},
+				},
+				"required": []string{"scope", "content"},
+			},
+		},
+		{
+			Name:        "read_memos",
+			Description: "Read previously written notes. Use to recall what you or other agents have observed.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"scope": map[string]any{
+						"type":        "string",
+						"enum":        []string{"agent", "host", "exercise"},
+						"description": "Which scope to read from",
+					},
+					"since_minutes": map[string]any{
+						"type":        "integer",
+						"description": "Only return memos from the last N minutes. Omit for all.",
+					},
+				},
+				"required": []string{"scope"},
+			},
+		},
+		{
 			Name:        "delegate_investigation",
 			Description: "Spawn an Investigator Agent to drill deeply into a specific suspicious file, process, or configuration.",
 			Parameters: map[string]any{
@@ -258,16 +358,20 @@ func GetToolsForRole(role string) []Tool {
 	case "investigator":
 		// Investigator does the deep dive, needs full access but not delegation
 		return filterTools(allTools, []string{
-			"execute_trusted", "read_file", "write_file", "get_system_env", 
-			"run_linpeas_sh", "run_linpeas_static", "run_pspy", "list_dir", 
+			"execute_trusted", "read_file", "write_file", "get_system_env",
+			"run_linpeas_sh", "run_linpeas_static", "run_pspy", "list_dir",
 			"search_files", "get_network_info", "submit_finding", "conclude",
+			"write_memo", "read_memos", "query_knowledge_base",
+			"check_cron", "check_users", "check_systemd", "check_suid", "check_modules", "check_listeners",
 		})
 	default:
 		// Phase Agents do broad searches, can delegate investigations
 		return filterTools(allTools, []string{
-			"execute_trusted", "read_file", "write_file", "get_system_env", 
-			"run_linpeas_sh", "run_linpeas_static", "run_pspy", "list_dir", 
+			"execute_trusted", "read_file", "write_file", "get_system_env",
+			"run_linpeas_sh", "run_linpeas_static", "run_pspy", "list_dir",
 			"search_files", "get_network_info", "delegate_investigation", "conclude",
+			"write_memo", "read_memos", "query_knowledge_base",
+			"check_cron", "check_users", "check_systemd", "check_suid", "check_modules", "check_listeners",
 		})
 	}
 }
