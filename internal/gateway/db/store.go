@@ -288,6 +288,40 @@ func (s *Store) GetMessageCountByRole(sessionID, agentRole string) (int, error) 
 	return count, err
 }
 
+func (s *Store) GetMessageCountByName(sessionID, agentName string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ? AND agent_name = ?`, sessionID, agentName).Scan(&count)
+	return count, err
+}
+
+func (s *Store) GetLastMessageByName(sessionID, agentName string) (*models.Message, error) {
+	var m models.Message
+	var toolCallsStr sql.NullString
+	var agentRole, assistantName sql.NullString
+	err := s.db.QueryRow(`
+		SELECT role, content, tool_calls, tool_call_id, agent_role, agent_name
+		FROM messages 
+		WHERE session_id = ? AND agent_name = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1
+	`, sessionID, agentName).Scan(&m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &agentRole, &assistantName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if toolCallsStr.Valid && toolCallsStr.String != "" && toolCallsStr.String != "null" {
+		json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
+	}
+	if agentRole.Valid {
+		m.AgentRole = agentRole.String
+	}
+	if assistantName.Valid {
+		m.AgentName = assistantName.String
+	}
+	return &m, nil
+}
+
 func (s *Store) CountMessages(sessionID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`
@@ -732,19 +766,19 @@ func (s *Store) GetSessionUpstreamModel(sessionID string) (string, error) {
 // --- Memos ---
 
 // CreateMemo inserts a new memo and returns it with the generated ID and timestamp.
-func (s *Store) CreateMemo(exerciseID, sessionID, host, scope, content, memoType string) (*models.Memo, error) {
+func (s *Store) CreateMemo(exerciseID, sessionID, host, scope, content, memoType, agentName string) (*models.Memo, error) {
 	if memoType == "" {
 		memoType = "observation"
 	}
 
 	var memo models.Memo
 	err := s.db.QueryRow(`
-		INSERT INTO memos (exercise_id, session_id, host, scope, content, memo_type)
-		VALUES (?, ?, ?, ?, ?, ?)
-		RETURNING id, exercise_id, session_id, host, scope, content, memo_type, created_at
-	`, exerciseID, sessionID, host, scope, content, memoType).Scan(
+		INSERT INTO memos (exercise_id, session_id, host, scope, content, memo_type, agent_name)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		RETURNING id, exercise_id, session_id, host, scope, content, memo_type, agent_name, created_at
+	`, exerciseID, sessionID, host, scope, content, memoType, agentName).Scan(
 		&memo.ID, &memo.ExerciseID, &memo.SessionID, &memo.Host,
-		&memo.Scope, &memo.Content, &memo.MemoType, &memo.CreatedAt,
+		&memo.Scope, &memo.Content, &memo.MemoType, &memo.AgentName, &memo.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -754,7 +788,7 @@ func (s *Store) CreateMemo(exerciseID, sessionID, host, scope, content, memoType
 
 // GetMemos retrieves memos matching the given filters.
 func (s *Store) GetMemos(exerciseID, scope, host, sessionID, since, memoType string, limit int) ([]models.Memo, error) {
-	query := `SELECT id, exercise_id, session_id, host, scope, content, memo_type, created_at FROM memos WHERE exercise_id = ?`
+	query := `SELECT id, exercise_id, session_id, host, scope, content, memo_type, agent_name, created_at FROM memos WHERE exercise_id = ?`
 	args := []any{exerciseID}
 
 	if scope != "" {
@@ -795,8 +829,12 @@ func (s *Store) GetMemos(exerciseID, scope, host, sessionID, since, memoType str
 	var memos []models.Memo
 	for rows.Next() {
 		var m models.Memo
-		if err := rows.Scan(&m.ID, &m.ExerciseID, &m.SessionID, &m.Host, &m.Scope, &m.Content, &m.MemoType, &m.CreatedAt); err != nil {
+		var agentName sql.NullString
+		if err := rows.Scan(&m.ID, &m.ExerciseID, &m.SessionID, &m.Host, &m.Scope, &m.Content, &m.MemoType, &agentName, &m.CreatedAt); err != nil {
 			return nil, err
+		}
+		if agentName.Valid {
+			m.AgentName = agentName.String
 		}
 		memos = append(memos, m)
 	}

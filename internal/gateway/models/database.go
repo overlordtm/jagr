@@ -89,5 +89,6 @@ type Memo struct {
 	Scope      string    `json:"scope"`
 	Content    string    `json:"content"`
 	MemoType   string    `json:"memo_type"`
+	AgentName  string    `json:"agent_name,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }

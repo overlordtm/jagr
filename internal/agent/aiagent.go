@@ -472,7 +472,7 @@ func (a *AiAgent) executeWriteMemo(tc ToolCall) (ToolResult, error) {
 		memoType = "observation"
 	}
 
-	resp, err := a.gateway.WriteMemo(scope, content, memoType, "")
+	resp, err := a.gateway.WriteMemo(scope, content, memoType, "", a.name)
 	if err != nil {
 		return ToolResult{}, err
 	}

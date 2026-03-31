@@ -437,11 +437,12 @@ func (gc *GatewayClient) SubmitAgentSettings() {
 }
 
 // WriteMemo creates a memo on the gateway and returns the JSON response.
-func (gc *GatewayClient) WriteMemo(scope, content, memoType, host string) (string, error) {
+func (gc *GatewayClient) WriteMemo(scope, content, memoType, host, agentName string) (string, error) {
 	payload := map[string]string{
-		"scope":     scope,
-		"content":   content,
-		"memo_type": memoType,
+		"scope":      scope,
+		"content":    content,
+		"memo_type":  memoType,
+		"agent_name": agentName,
 	}
 	if host != "" {
 		payload["host"] = host

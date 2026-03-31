@@ -311,17 +311,25 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 	agentName := r.Header.Get("X-Agent-Name")
 
 	// Store only NEW incoming messages in DB for dashboard visibility.
-	// The agent sends the full conversation each time, so skip messages
-	// we already have stored. Count is scoped per agent role because
-	// each agent maintains its own independent conversation.
-	existingCount, _ := g.store.GetMessageCountByRole(sessionID, agentRole)
-	if len(req.Messages) > existingCount {
-		for _, msg := range req.Messages[existingCount:] {
-			if msg.Role != "assistant" {
-				msg.AgentRole = agentRole
-				msg.AgentName = agentName
-				g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0, 0)
+	// We match against the last stored message for this agent name to handle
+	// rolling windows and avoid duplicates.
+	lastStored, err := g.store.GetLastMessageByName(sessionID, agentName)
+	newMessages := req.Messages
+	if err == nil {
+		// Find the last stored message in the request context
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if g.messagesMatch(req.Messages[i], *lastStored) {
+				newMessages = req.Messages[i+1:]
+				break
 			}
+		}
+	}
+
+	for _, msg := range newMessages {
+		if msg.Role != "assistant" {
+			msg.AgentRole = agentRole
+			msg.AgentName = agentName
+			g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0, 0)
 		}
 	}
 
@@ -1062,10 +1070,11 @@ func (g *Gateway) createMemoHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Scope    string `json:"scope"`
-		Host     string `json:"host"`
-		Content  string `json:"content"`
-		MemoType string `json:"memo_type"`
+		Scope     string `json:"scope"`
+		Host      string `json:"host"`
+		Content   string `json:"content"`
+		MemoType  string `json:"memo_type"`
+		AgentName string `json:"agent_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1084,7 +1093,7 @@ func (g *Gateway) createMemoHandler(w http.ResponseWriter, r *http.Request) {
 		host = agent.Hostname
 	}
 
-	memo, err := g.store.CreateMemo(exerciseID, session.ID, host, req.Scope, req.Content, req.MemoType)
+	memo, err := g.store.CreateMemo(exerciseID, session.ID, host, req.Scope, req.Content, req.MemoType, req.AgentName)
 	if err != nil {
 		g.log.Error("Failed to create memo", zap.Error(err))
 		http.Error(w, "failed to create memo", http.StatusInternalServerError)
@@ -1164,4 +1173,28 @@ func (g *Gateway) adminLogsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(logs)
+}
+
+func (g *Gateway) messagesMatch(a, b models.Message) bool {
+	if a.Role != b.Role {
+		return false
+	}
+	if a.Content != b.Content {
+		return false
+	}
+	if len(a.ToolCalls) != len(b.ToolCalls) {
+		return false
+	}
+	for i := range a.ToolCalls {
+		if a.ToolCalls[i].ID != b.ToolCalls[i].ID ||
+			a.ToolCalls[i].Function.Name != b.ToolCalls[i].Function.Name ||
+			a.ToolCalls[i].Function.Arguments != b.ToolCalls[i].Function.Arguments {
+			return false
+		}
+	}
+	// ToolCallID for tool-role messages
+	if a.ToolCallID != b.ToolCallID {
+		return false
+	}
+	return true
 }

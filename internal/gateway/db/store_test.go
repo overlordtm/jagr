@@ -289,3 +289,65 @@ func TestUpdateFindingStatus(t *testing.T) {
 		t.Errorf("Expected status duplicate, got %s", findings[1].Status)
 	}
 }
+
+func TestGetLastMessageByName(t *testing.T) {
+	store := newTestStore(t)
+	agent, _ := store.FindOrCreateAgentByHostname("test-host")
+	session, _ := store.CreateSession(agent.ID)
+
+	msg1 := &models.Message{Role: "user", Content: "Hello", AgentName: "agent-1"}
+	msg2 := &models.Message{Role: "assistant", Content: "Hi", AgentName: "agent-1"}
+	msg3 := &models.Message{Role: "user", Content: "Other", AgentName: "agent-2"}
+
+	store.AppendMessage(session.ID, msg1, "m1", 0, 0, 0, 0, 0)
+	store.AppendMessage(session.ID, msg2, "m1", 0, 0, 0, 0, 0)
+	store.AppendMessage(session.ID, msg3, "m1", 0, 0, 0, 0, 0)
+
+	last, err := store.GetLastMessageByName(session.ID, "agent-1")
+	if err != nil {
+		t.Fatalf("Failed to get last message for agent-1: %v", err)
+	}
+	if last.Content != "Hi" {
+		t.Errorf("Expected 'Hi', got %s", last.Content)
+	}
+
+	last2, err := store.GetLastMessageByName(session.ID, "agent-2")
+	if err != nil {
+		t.Fatalf("Failed to get last message for agent-2: %v", err)
+	}
+	if last2.Content != "Other" {
+		t.Errorf("Expected 'Other', got %s", last2.Content)
+	}
+
+	_, err = store.GetLastMessageByName(session.ID, "non-existent")
+	if err != ErrNotFound {
+		t.Errorf("Expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestMemos(t *testing.T) {
+	store := newTestStore(t)
+	agent, _ := store.FindOrCreateAgentByHostname("test-host")
+	session, _ := store.CreateSession(agent.ID)
+
+	// Create a memo with agent name
+	memo, err := store.CreateMemo(agent.ID, session.ID, "host-1", "host", "Observation 1", "observation", "agent-x")
+	if err != nil {
+		t.Fatalf("Failed to create memo: %v", err)
+	}
+	if memo.AgentName != "agent-x" {
+		t.Errorf("Expected agent-x, got %s", memo.AgentName)
+	}
+
+	// Retrieve memos
+	memos, err := store.GetMemos(agent.ID, "host", "host-1", "", "", "", 10)
+	if err != nil {
+		t.Fatalf("Failed to get memos: %v", err)
+	}
+	if len(memos) != 1 {
+		t.Fatalf("Expected 1 memo, got %d", len(memos))
+	}
+	if memos[0].AgentName != "agent-x" {
+		t.Errorf("Expected agent-x in retrieved memo, got %s", memos[0].AgentName)
+	}
+}

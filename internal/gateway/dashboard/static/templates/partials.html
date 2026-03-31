@@ -113,12 +113,38 @@
         {{if .AgentRole}}<span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{agentColor .AgentRole}}">{{.AgentRole}}</span>{{end}}
         {{if .ToolCallID}}<span class="text-xs font-mono text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{shortID .ToolCallID}}</span>{{end}}
         {{if .Model}}<span class="text-xs text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{.Model}}</span>{{end}}
-        {{if .TokensIn}}<span class="text-xs text-gray-500 tabular-nums">{{.TokensIn}}+{{.TokensOut}} tok</span>{{end}}
-        {{if .TokensThinking}}<span class="text-xs text-violet-400/80 tabular-nums">{{.TokensThinking}} thinking</span>{{end}}
-        {{if gt .CostUSD 0.0}}<span class="text-xs text-amber-500/80 tabular-nums">{{formatCost .CostUSD}}</span>{{end}}
-        {{if .LatencyMs}}<span class="text-xs text-gray-600 tabular-nums">{{.LatencyMs}}ms</span>{{end}}
-        <span class="text-xs text-gray-600 ml-auto tabular-nums">{{formatTime .CreatedAt}}</span>
-    </div>
+        
+        <div class="flex items-center gap-3 ml-1">
+            {{if .TokensIn}}
+            <span class="inline-flex items-center gap-1 text-xs text-gray-500 tabular-nums bg-gray-800/40 rounded px-1.5 py-0.5" title="Prompt + Completion tokens">
+                <svg class="h-3 w-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>
+                {{.TokensIn}}+{{.TokensOut}}
+            </span>
+            {{end}}
+            
+            {{if .TokensThinking}}
+            <span class="inline-flex items-center gap-1 text-xs text-violet-400/80 tabular-nums bg-violet-500/5 rounded px-1.5 py-0.5" title="Thinking tokens">
+                <svg class="h-3 w-3 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.989-2.386l-.548-.547z"/></svg>
+                {{.TokensThinking}}
+            </span>
+            {{end}}
+
+            {{if gt .CostUSD 0.0}}
+            <span class="inline-flex items-center gap-1 text-xs text-amber-500/80 tabular-nums bg-amber-500/5 rounded px-1.5 py-0.5" title="Cost (USD)">
+                <svg class="h-3 w-3 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                {{formatCost .CostUSD}}
+            </span>
+            {{end}}
+
+            {{if .LatencyMs}}
+            <span class="inline-flex items-center gap-1 text-xs text-gray-500 tabular-nums bg-gray-800/40 rounded px-1.5 py-0.5" title="Latency">
+                <svg class="h-3 w-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                {{.LatencyMs}}ms
+            </span>
+            {{end}}
+        </div>
+
+        <span class="text-xs text-gray-600 ml-auto tabular-nums">{{formatTime .CreatedAt}}</span>    </div>
 
     {{if .ReasoningContent}}
     <details class="pl-1 mb-1">
