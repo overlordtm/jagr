@@ -28,9 +28,11 @@ type MessageLog struct {
 	ToolCalls    string    `json:"tool_calls,omitempty"`
 	ToolCallID   string    `json:"tool_call_id,omitempty"`
 	Model        string    `json:"model,omitempty"`
-	TokensIn     int       `json:"tokens_in,omitempty"`
-	TokensOut    int       `json:"tokens_out,omitempty"`
-	CostUSD      float64   `json:"cost_usd,omitempty"`
+	TokensIn         int       `json:"tokens_in,omitempty"`
+	TokensOut        int       `json:"tokens_out,omitempty"`
+	TokensThinking   int       `json:"tokens_thinking,omitempty"`
+	ReasoningContent string    `json:"reasoning_content,omitempty"`
+	CostUSD          float64   `json:"cost_usd,omitempty"`
 	LatencyMs    int       `json:"latency_ms,omitempty"`
 	AgentRole    string    `json:"agent_role,omitempty"`
 	AgentName    string    `json:"agent_name,omitempty"`

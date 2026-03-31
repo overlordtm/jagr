@@ -16,9 +16,9 @@ type Tool struct {
 
 // ToolCall represents an LLM tool call
 type ToolCall struct {
-	ID       string    `json:"id"`
-	Type     string    `json:"type"`
-	Function Function  `json:"function"`
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
 }
 
 type Function struct {
@@ -28,12 +28,12 @@ type Function struct {
 
 // ToolResult represents the result of executing a tool
 type ToolResult struct {
-	ToolID     string        `json:"tool_id"`
-	Name       string        `json:"name"`
-	Content    string        `json:"content"`
-	IsError    bool          `json:"is_error,omitempty"`
-	ExitCode   int           `json:"exit_code,omitempty"`
-	Duration   time.Duration `json:"-"`
+	ToolID   string        `json:"tool_id"`
+	Name     string        `json:"name"`
+	Content  string        `json:"content"`
+	IsError  bool          `json:"is_error,omitempty"`
+	ExitCode int           `json:"exit_code,omitempty"`
+	Duration time.Duration `json:"-"`
 }
 
 // GetAvailableTools returns the list of tools the agent can use
@@ -230,7 +230,7 @@ func GetAvailableTools() []Tool {
 		},
 		{
 			Name:        "query_knowledge_base",
-			Description: "Search the exercise knowledge base for relevant documentation, network maps, baseline configurations, and system manuals. Use this to understand what is expected/normal on this system.",
+			Description: "Search the exercise knowledge base for relevant exercise documentation, network maps, and manuals for specialized software. Use this if you find something you have no knowledge of.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -350,7 +350,7 @@ func GetAvailableTools() []Tool {
 // GetToolsForRole filters the available tools based on the SubAgent's role
 func GetToolsForRole(role string) []Tool {
 	allTools := GetAvailableTools()
-	
+
 	switch role {
 	case "reporter":
 		// Reporter only needs file reading/writing and conclude
@@ -382,7 +382,7 @@ func filterTools(tools []Tool, allowed []string) []Tool {
 	for _, a := range allowed {
 		allowSet[a] = true
 	}
-	
+
 	for _, t := range tools {
 		if allowSet[t.Name] {
 			filtered = append(filtered, t)
@@ -403,7 +403,7 @@ func ParseToolArguments(args string) (map[string]any, error) {
 // FormatToolOutput formats tool output for the LLM, applying filters and truncation
 func FormatToolOutput(output string, tool string, maxLines int) string {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
-	
+
 	if len(lines) > maxLines {
 		// Show first and last lines with truncation notice
 		truncated := make([]string, 0, maxLines)
@@ -421,7 +421,7 @@ func FormatToolOutput(output string, tool string, maxLines int) string {
 		}
 		return strings.Join(truncated, "\n")
 	}
-	
+
 	return output
 }
 
@@ -429,7 +429,7 @@ func FormatToolOutput(output string, tool string, maxLines int) string {
 func FilterLinPEASOutput(output string) string {
 	var criticalHigh []string
 	lines := strings.Split(output, "\n")
-	
+
 	for _, line := range lines {
 		lineLower := strings.ToLower(line)
 		// Look for RED/YELLOW color codes or severity keywords
@@ -440,7 +440,7 @@ func FilterLinPEASOutput(output string) string {
 			}
 		}
 	}
-	
+
 	return strings.Join(criticalHigh, "\n")
 }
 
@@ -448,7 +448,7 @@ func FilterLinPEASOutput(output string) string {
 func DeduplicatepspyEvents(output string) string {
 	events := make(map[string][]string)
 	lines := strings.Split(output, "\n")
-	
+
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -459,7 +459,7 @@ func DeduplicatepspyEvents(output string) string {
 			events[binary] = append(events[binary], line)
 		}
 	}
-	
+
 	var result []string
 	for binary, binaryEvents := range events {
 		// Show one representative event per binary
@@ -468,7 +468,7 @@ func DeduplicatepspyEvents(output string) string {
 			result = append(result, "  "+binaryEvents[0])
 		}
 	}
-	
+
 	return strings.Join(result, "\n")
 }
 

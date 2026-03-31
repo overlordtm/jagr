@@ -87,6 +87,12 @@ logging:
 #     base_url: https://openrouter.ai/api/v1
 #     api_key: ${OPENROUTER_API_KEY}
 
+# Skills directory — each file becomes a skill available to all agents.
+# The filename (without extension) is the skill name, and the file content
+# is injected into agent prompts. An optional first line starting with "# "
+# is used as the skill description.
+# skills_dir: /etc/jagr/skills
+
 agents:
   # Examples of agent profile configurations
   phase_UserAccess:

@@ -45,6 +45,7 @@ type GatewayClient struct {
 	defaultMaxIter      int
 	modelsContextWindow map[string]int
 	defaultModel        string
+	skills              []Skill
 
 	mu sync.Mutex
 }
@@ -115,20 +116,15 @@ func (gc *GatewayClient) doRequest(req *http.Request, reqBody []byte) (*http.Res
 			continue
 		}
 
+		if resp.StatusCode == http.StatusPaymentRequired {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("token budget exceeded: %s", string(bodyBytes))
+		}
+
 		if resp.StatusCode == http.StatusTooManyRequests {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-
-			var errResp struct {
-				Error struct {
-					Code    string `json:"code"`
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if json.Unmarshal(bodyBytes, &errResp) == nil && errResp.Error.Code == "token_budget_exceeded" {
-				return nil, fmt.Errorf("token budget exceeded: %s", errResp.Error.Message)
-			}
-
 			rateLimitAttempts++
 			if rateLimitAttempts > maxRateLimitRetries {
 				return nil, fmt.Errorf("rate limited after %d retries: %s", rateLimitAttempts, string(bodyBytes))
@@ -246,6 +242,43 @@ func (gc *GatewayClient) FetchModelsContextWindows() {
 	} else {
 		gc.logger.Debug("Failed to decode models", zap.Error(err))
 	}
+}
+
+// FetchSkills loads skills from the gateway.
+func (gc *GatewayClient) FetchSkills() {
+	req, err := http.NewRequest("GET", gc.gatewayURL+"/v1/skills", nil)
+	if err != nil {
+		gc.logger.Debug("Failed to create skills fetch request", zap.Error(err))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
+	req.Header.Set("X-Hostname", gc.hostname)
+
+	resp, err := gc.httpClient.Do(req)
+	if err != nil {
+		gc.logger.Debug("Failed to fetch skills", zap.Error(err))
+		return
+	}
+	defer resp.Body.Close()
+
+	var skillsResp struct {
+		Skills []Skill `json:"skills"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&skillsResp); err == nil {
+		gc.mu.Lock()
+		gc.skills = skillsResp.Skills
+		gc.mu.Unlock()
+		gc.logger.Info("Loaded skills from gateway", zap.Int("count", len(skillsResp.Skills)))
+	} else {
+		gc.logger.Debug("Failed to decode skills", zap.Error(err))
+	}
+}
+
+// GetSkills returns the cached skills from the gateway.
+func (gc *GatewayClient) GetSkills() []Skill {
+	gc.mu.Lock()
+	defer gc.mu.Unlock()
+	return gc.skills
 }
 
 // SendHeartbeat sends a keep-alive heartbeat to the gateway.

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,14 +21,22 @@ import (
 	"github.com/overlordtm/jagr/internal/gateway/provider"
 )
 
-type Gateway struct {
-	store       *db.Store
-	log         *zap.Logger
-	provider    provider.Provider
-	config      *models.Config
-	kb          knowledge.Store
+// Skill represents a reusable instruction/procedure served to agents.
+type Skill struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Content     string `json:"content"`
+}
 
-	mu          sync.RWMutex
+type Gateway struct {
+	store    *db.Store
+	log      *zap.Logger
+	provider provider.Provider
+	config   *models.Config
+	kb       knowledge.Store
+	skills   []Skill
+
+	mu sync.RWMutex
 	// tracks per-session token usage for budget enforcement
 	tokenCounts map[string]int
 	rateLimiter *provider.RateLimiter
@@ -62,15 +72,66 @@ func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
 		return nil, fmt.Errorf("knowledge store: %w", err)
 	}
 
+	var skills []Skill
+	if config.SkillsDir != "" {
+		var err error
+		skills, err = loadSkills(config.SkillsDir)
+		if err != nil {
+			log.Error("Failed to load skills", zap.String("dir", config.SkillsDir), zap.Error(err))
+		} else {
+			log.Info("Loaded skills from directory", zap.String("dir", config.SkillsDir), zap.Int("count", len(skills)))
+		}
+	}
+
 	return &Gateway{
 		store:       store,
 		log:         log,
 		provider:    p,
 		config:      config,
 		kb:          kb,
+		skills:      skills,
 		tokenCounts: make(map[string]int),
 		rateLimiter: provider.NewRateLimiter(config.RateLimit.RequestsPerMinute, config.RateLimit.MaxConcurrent),
 	}, nil
+}
+
+// loadSkills reads all files from the skills directory. Each file becomes a skill
+// where the filename (without extension) is the skill name and the file content
+// is the skill content. An optional first line starting with "# " is used as description.
+func loadSkills(dir string) ([]Skill, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading skills directory: %w", err)
+	}
+
+	var skills []Skill
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("reading skill file %s: %w", name, err)
+		}
+
+		skillName := strings.TrimSuffix(name, filepath.Ext(name))
+		body := string(content)
+		var description string
+
+		// Extract optional description from first line if it starts with "# "
+		if lines := strings.SplitN(body, "\n", 2); len(lines) >= 2 && strings.HasPrefix(lines[0], "# ") {
+			description = strings.TrimPrefix(lines[0], "# ")
+			body = lines[1]
+		}
+
+		skills = append(skills, Skill{
+			Name:        skillName,
+			Description: description,
+			Content:     strings.TrimSpace(body),
+		})
+	}
+	return skills, nil
 }
 
 func (g *Gateway) Start() error {
@@ -140,6 +201,7 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/v1/agent-settings", g.submitAgentSettingsHandler).Methods("POST")
 	router.HandleFunc("/v1/memos", g.createMemoHandler).Methods("POST")
 	router.HandleFunc("/v1/memos", g.getMemosHandler).Methods("GET")
+	router.HandleFunc("/v1/skills", g.skillsHandler).Methods("GET")
 	router.HandleFunc("/v1/knowledge/query", g.knowledgeQueryHandler).Methods("POST")
 	router.HandleFunc("/v1/knowledge/ingest", g.knowledgeIngestHandler).Methods("POST")
 	router.HandleFunc("/v1/knowledge/collections", g.knowledgeCollectionsHandler).Methods("GET")
@@ -233,7 +295,7 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 			zap.Int("total_tokens", totalTokens),
 			zap.Int("max_tokens", maxTok))
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusPaymentRequired)
 		json.NewEncoder(w).Encode(models.ErrorResponse{
 			Error: models.ErrorInfo{
 				Message: fmt.Sprintf("session token budget exceeded (%d/%d)", totalTokens, maxTok),
@@ -258,7 +320,7 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 			if msg.Role != "assistant" {
 				msg.AgentRole = agentRole
 				msg.AgentName = agentName
-				g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0)
+				g.store.AppendMessage(sessionID, &msg, "", 0, 0, 0, 0, 0)
 			}
 		}
 	}
@@ -294,31 +356,37 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 
-	// Calculate cost
 	var costUSD float64
-	if p, ok := g.provider.(*provider.OpenAICompatibleProvider); ok && resp.Usage != nil {
-		_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	}
-
-	var tokensIn, tokensOut int
+	var tokensIn, tokensOut, tokensThinking int
 	if resp.Usage != nil {
 		tokensIn = resp.Usage.PromptTokens
 		tokensOut = resp.Usage.CompletionTokens
+		if resp.Usage.CompletionTokensDetails != nil {
+			tokensThinking = resp.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		// Prefer provider-reported cost (e.g. OpenRouter), fall back to local estimate
+		if resp.Usage.Cost != nil {
+			costUSD = *resp.Usage.Cost
+		} else if p, ok := g.provider.(*provider.OpenAICompatibleProvider); ok {
+			_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		}
 	}
 
 	g.store.LogAudit(agent.ID, "response", map[string]any{
-		"model":       resp.Model,
-		"tokens_in":   tokensIn,
-		"tokens_out":  tokensOut,
-		"cost_usd":    costUSD,
-		"latency_ms":  latency,
-		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"model":           resp.Model,
+		"tokens_in":       tokensIn,
+		"tokens_out":      tokensOut,
+		"tokens_thinking": tokensThinking,
+		"cost_usd":        costUSD,
+		"latency_ms":      latency,
+		"timestamp":       time.Now().UTC().Format(time.RFC3339),
 	})
 
 	g.log.Info("Request completed",
 		zap.String("model", resp.Model),
 		zap.Int("tokens_in", tokensIn),
 		zap.Int("tokens_out", tokensOut),
+		zap.Int("tokens_thinking", tokensThinking),
 		zap.Float64("cost_usd", costUSD),
 		zap.Int64("latency_ms", latency),
 		zap.String("hostname", agent.Hostname))
@@ -330,12 +398,13 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	g.store.AppendMessage(sessionID, &models.Message{
-		Role:      "assistant",
-		Content:   resp.Choices[0].Message.Content,
-		ToolCalls: resp.Choices[0].Message.ToolCalls,
-		AgentRole: agentRole,
-		AgentName: agentName,
-	}, resp.Model, tokensIn, tokensOut, costUSD, int(latency))
+		Role:             "assistant",
+		Content:          resp.Choices[0].Message.Content,
+		ReasoningContent: resp.Choices[0].Message.ReasoningContent,
+		ToolCalls:        resp.Choices[0].Message.ToolCalls,
+		AgentRole:        agentRole,
+		AgentName:        agentName,
+	}, resp.Model, tokensIn, tokensOut, tokensThinking, costUSD, int(latency))
 
 	g.store.UpdateAgentConfigUpstream(sessionID, agentRole, req.Model, resp.Model, g.config.Providers[0].Name)
 
@@ -390,6 +459,19 @@ func (g *Gateway) agentConfigHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"agents":                 g.config.Agents,
 		"default_max_iterations": g.config.DefaultMaxIterations,
+	})
+}
+
+func (g *Gateway) skillsHandler(w http.ResponseWriter, r *http.Request) {
+	_, err := g.authenticateAgent(r)
+	if err != nil {
+		http.Error(w, "invalid API key", http.StatusUnauthorized)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"skills": g.skills,
 	})
 }
 
@@ -559,32 +641,38 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
-	// Calculate cost
 	var costUSD float64
-	if p, ok := g.provider.(*provider.OpenAICompatibleProvider); ok && resp.Usage != nil {
-		_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	}
-
-	var tokensIn, tokensOut int
+	var tokensIn, tokensOut, tokensThinking int
 	if resp.Usage != nil {
 		tokensIn = resp.Usage.PromptTokens
 		tokensOut = resp.Usage.CompletionTokens
+		if resp.Usage.CompletionTokensDetails != nil {
+			tokensThinking = resp.Usage.CompletionTokensDetails.ReasoningTokens
+		}
+		// Prefer provider-reported cost (e.g. OpenRouter), fall back to local estimate
+		if resp.Usage.Cost != nil {
+			costUSD = *resp.Usage.Cost
+		} else if p, ok := g.provider.(*provider.OpenAICompatibleProvider); ok {
+			_, _, costUSD = p.Pricing.CalculateCost(resp.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+		}
 	}
 
 	g.store.LogAudit(agent.ID, "response", map[string]any{
-		"model":      resp.Model,
-		"tokens_in":  tokensIn,
-		"tokens_out": tokensOut,
-		"cost_usd":   costUSD,
-		"latency_ms": latency,
-		"stream":     true,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"model":           resp.Model,
+		"tokens_in":       tokensIn,
+		"tokens_out":      tokensOut,
+		"tokens_thinking": tokensThinking,
+		"cost_usd":        costUSD,
+		"latency_ms":      latency,
+		"stream":          true,
+		"timestamp":       time.Now().UTC().Format(time.RFC3339),
 	})
 
 	g.log.Info("Streaming request completed",
 		zap.String("model", resp.Model),
 		zap.Int("tokens_in", tokensIn),
 		zap.Int("tokens_out", tokensOut),
+		zap.Int("tokens_thinking", tokensThinking),
 		zap.Float64("cost_usd", costUSD),
 		zap.Int64("latency_ms", latency))
 
@@ -595,12 +683,13 @@ func (g *Gateway) handleStreamingRequest(w http.ResponseWriter, r *http.Request,
 			g.mu.Unlock()
 		}
 		g.store.AppendMessage(sessionID, &models.Message{
-			Role:      "assistant",
-			Content:   resp.Choices[0].Message.Content,
-			ToolCalls: resp.Choices[0].Message.ToolCalls,
-			AgentRole: r.Header.Get("X-Agent-Role"),
-			AgentName: r.Header.Get("X-Agent-Name"),
-		}, resp.Model, tokensIn, tokensOut, costUSD, int(latency))
+			Role:             "assistant",
+			Content:          resp.Choices[0].Message.Content,
+			ReasoningContent: resp.Choices[0].Message.ReasoningContent,
+			ToolCalls:        resp.Choices[0].Message.ToolCalls,
+			AgentRole:        r.Header.Get("X-Agent-Role"),
+			AgentName:        r.Header.Get("X-Agent-Name"),
+		}, resp.Model, tokensIn, tokensOut, tokensThinking, costUSD, int(latency))
 
 		g.store.UpdateAgentConfigUpstream(sessionID, r.Header.Get("X-Agent-Role"), req.Model, resp.Model, g.config.Providers[0].Name)
 	}

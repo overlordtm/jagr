@@ -126,6 +126,17 @@ func (tb *ToolBox) execExecuteTrusted(tc ToolCall, args map[string]any) (ToolRes
 		cmdArgs = parts[1:]
 	}
 
+	// If the command contains shell metacharacters (pipes, redirections, etc.),
+	// wrap everything in "sh -c" so the shell interprets them.
+	fullCmd := command
+	if len(cmdArgs) > 0 {
+		fullCmd = command + " " + strings.Join(cmdArgs, " ")
+	}
+	if strings.ContainsAny(fullCmd, "|;&><$`") {
+		cmdArgs = []string{"-c", fullCmd}
+		command = "sh"
+	}
+
 	stdout, stderr, exitCode, err := tb.cleanRoom.ExecuteTrusted(command, cmdArgs)
 	return ToolResult{
 		ToolID:   tc.ID,

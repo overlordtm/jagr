@@ -296,13 +296,13 @@ func (s *Store) CountMessages(sessionID string) (int, error) {
 	return count, err
 }
 
-func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, tokensIn, tokensOut int, costUSD float64, latencyMs int) error {
+func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, tokensIn, tokensOut, tokensThinking int, costUSD float64, latencyMs int) error {
 	toolCallsJSON, _ := json.Marshal(msg.ToolCalls)
 
 	_, err := s.db.Exec(`
-		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, agent_role, agent_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, costUSD, latencyMs, msg.AgentRole, msg.AgentName)
+		INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, tokens_thinking, reasoning_content, cost_usd, latency_ms, agent_role, agent_name)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessID, msg.Role, msg.Content, string(toolCallsJSON), msg.ToolCallID, model, tokensIn, tokensOut, tokensThinking, msg.ReasoningContent, costUSD, latencyMs, msg.AgentRole, msg.AgentName)
 	if err != nil {
 		return err
 	}
@@ -313,7 +313,7 @@ func (s *Store) AppendMessage(sessID string, msg *models.Message, model string, 
 
 func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, agent_role, agent_name, created_at
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, tokens_thinking, reasoning_content, cost_usd, latency_ms, agent_role, agent_name, created_at
 		FROM messages WHERE session_id = ? ORDER BY created_at ASC
 	`, sessionID)
 	if err != nil {
@@ -326,7 +326,7 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
 		var agentRole, agentName sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &agentRole, &agentName, &m.CreatedAt)
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.TokensThinking, &m.ReasoningContent, &m.CostUSD, &m.LatencyMs, &agentRole, &agentName, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -346,7 +346,7 @@ func (s *Store) GetSessionMessages(sessionID string) ([]models.MessageLog, error
 
 func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog, error) {
 	query := `
-		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, agent_role, agent_name, created_at
+		SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, tokens_thinking, reasoning_content, cost_usd, latency_ms, agent_role, agent_name, created_at
 		FROM messages WHERE session_id = ? AND (tool_calls IS NOT NULL OR role = 'tool')
 		ORDER BY created_at ASC
 	`
@@ -361,7 +361,7 @@ func (s *Store) GetMessagesWithToolCalls(sessionID string) ([]models.MessageLog,
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
 		var agentRole, agentName sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &agentRole, &agentName, &m.CreatedAt)
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.TokensThinking, &m.ReasoningContent, &m.CostUSD, &m.LatencyMs, &agentRole, &agentName, &m.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -388,9 +388,9 @@ func (s *Store) GetSessionMessagesPaginatedFiltered(sessionID, agentFilter strin
 	var err error
 	if agentFilter != "" {
 		if agentFilter == "main" {
-			err = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ? AND (agent_role IS NULL OR agent_role = '')`, sessionID).Scan(&total)
+			err = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ? AND (agent_name IS NULL OR agent_name = '')`, sessionID).Scan(&total)
 		} else {
-			err = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ? AND agent_role = ?`, sessionID, agentFilter).Scan(&total)
+			err = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ? AND agent_name = ?`, sessionID, agentFilter).Scan(&total)
 		}
 	} else {
 		err = s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&total)
@@ -403,18 +403,18 @@ func (s *Store) GetSessionMessagesPaginatedFiltered(sessionID, agentFilter strin
 	if agentFilter != "" {
 		if agentFilter == "main" {
 			rows, err = s.db.Query(`
-				SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, agent_role, agent_name, created_at
-				FROM messages WHERE session_id = ? AND (agent_role IS NULL OR agent_role = '') ORDER BY created_at ASC LIMIT ? OFFSET ?
+				SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, tokens_thinking, reasoning_content, cost_usd, latency_ms, agent_role, agent_name, created_at
+				FROM messages WHERE session_id = ? AND (agent_name IS NULL OR agent_name = '') ORDER BY created_at ASC LIMIT ? OFFSET ?
 			`, sessionID, limit, offset)
 		} else {
 			rows, err = s.db.Query(`
-				SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, agent_role, agent_name, created_at
-				FROM messages WHERE session_id = ? AND agent_role = ? ORDER BY created_at ASC LIMIT ? OFFSET ?
+				SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, tokens_thinking, reasoning_content, cost_usd, latency_ms, agent_role, agent_name, created_at
+				FROM messages WHERE session_id = ? AND agent_name = ? ORDER BY created_at ASC LIMIT ? OFFSET ?
 			`, sessionID, agentFilter, limit, offset)
 		}
 	} else {
 		rows, err = s.db.Query(`
-			SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, cost_usd, latency_ms, agent_role, agent_name, created_at
+			SELECT id, session_id, role, content, tool_calls, tool_call_id, model, tokens_in, tokens_out, tokens_thinking, reasoning_content, cost_usd, latency_ms, agent_role, agent_name, created_at
 			FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?
 		`, sessionID, limit, offset)
 	}
@@ -428,7 +428,7 @@ func (s *Store) GetSessionMessagesPaginatedFiltered(sessionID, agentFilter strin
 		var m models.MessageLog
 		var toolCallsStr sql.NullString
 		var agentRole, agentName sql.NullString
-		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.CostUSD, &m.LatencyMs, &agentRole, &agentName, &m.CreatedAt)
+		err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &toolCallsStr, &m.ToolCallID, &m.Model, &m.TokensIn, &m.TokensOut, &m.TokensThinking, &m.ReasoningContent, &m.CostUSD, &m.LatencyMs, &agentRole, &agentName, &m.CreatedAt)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -446,9 +446,9 @@ func (s *Store) GetSessionMessagesPaginatedFiltered(sessionID, agentFilter strin
 	return messages, total, rows.Err()
 }
 
-func (s *Store) GetSessionAgentRoles(sessionID string) ([]string, error) {
+func (s *Store) GetSessionAgentNames(sessionID string) ([]string, error) {
 	rows, err := s.db.Query(`
-		SELECT DISTINCT COALESCE(NULLIF(agent_role, ''), 'main') as role
+		SELECT DISTINCT COALESCE(NULLIF(agent_name, ''), 'main') as role
 		FROM messages WHERE session_id = ? ORDER BY role
 	`, sessionID)
 	if err != nil {

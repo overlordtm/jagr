@@ -60,6 +60,7 @@ func (h *JagrHarness) Run() error {
 
 	h.gateway.FetchProfiles()
 	h.gateway.FetchModelsContextWindows()
+	h.gateway.FetchSkills()
 
 	heartbeatDone := make(chan struct{})
 	go h.heartbeatLoop(heartbeatDone)

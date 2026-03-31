@@ -1,20 +1,5 @@
 package agent
 
-// ContextStrategy determines how raw conversation history is transformed
-// into the messages slice sent to the LLM.
-type ContextStrategy interface {
-	// Select receives the full raw history and returns the messages
-	// that should be sent to the LLM for the next request.
-	Select(history []Message) []Message
-}
-
-// FullHistoryStrategy returns the entire conversation history unchanged.
-type FullHistoryStrategy struct{}
-
-func (s *FullHistoryStrategy) Select(history []Message) []Message {
-	return history
-}
-
 // ContextMagic holds the raw conversation history and uses a pluggable
 // ContextStrategy to decide which messages are provided to the LLM.
 type ContextMagic struct {

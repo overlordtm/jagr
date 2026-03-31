@@ -91,3 +91,5 @@ ssh_config
 
 # direnv
 .direnv/
+
+jagr.db*

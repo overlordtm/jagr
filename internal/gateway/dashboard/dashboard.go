@@ -225,24 +225,24 @@ func init() {
 		},
 		"groupMessagesByAgent": func(messages []models.MessageLog) []messageGroup {
 			order := []string{}
-			byRole := map[string]*messageGroup{}
+			byName := map[string]*messageGroup{}
 			for _, m := range messages {
-				role := m.AgentRole
-				if role == "" {
-					role = "main"
+				name := m.AgentName
+				if name == "" {
+					name = "main"
 				}
-				g, ok := byRole[role]
+				g, ok := byName[name]
 				if !ok {
-					g = &messageGroup{AgentRole: role}
-					byRole[role] = g
-					order = append(order, role)
+					g = &messageGroup{AgentName: name}
+					byName[name] = g
+					order = append(order, name)
 				}
 				g.Messages = append(g.Messages, m)
 			}
 			// Detect whether each agent concluded normally by checking the
 			// last assistant message: either it called the "conclude" tool,
 			// or it responded with content but no tool calls (LLM chose to stop).
-			for _, g := range byRole {
+			for _, g := range byName {
 				for i := len(g.Messages) - 1; i >= 0; i-- {
 					m := g.Messages[i]
 					if m.Role != "assistant" {
@@ -258,7 +258,7 @@ func init() {
 			}
 			groups := make([]messageGroup, 0, len(order))
 			for _, role := range order {
-				groups = append(groups, *byRole[role])
+				groups = append(groups, *byName[role])
 			}
 			return groups
 		},
@@ -267,7 +267,7 @@ func init() {
 }
 
 type messageGroup struct {
-	AgentRole string
+	AgentName string
 	Messages  []models.MessageLog
 	Concluded bool // true if the subagent concluded normally (called conclude tool or responded without tool calls)
 }
@@ -451,7 +451,7 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 	findingCount, _ := d.store.GetSessionFindingCount(sessionID)
 	hasReport, _ := d.store.HasReport(sessionID)
 	upstreamModel, _ := d.store.GetSessionUpstreamModel(sessionID)
-	agentRoles, _ := d.store.GetSessionAgentRoles(sessionID)
+	agentNames, _ := d.store.GetSessionAgentNames(sessionID)
 
 	d.render(w, "layout", map[string]any{
 		"Page":          "session",
@@ -461,7 +461,7 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 		"FindingCount":  findingCount,
 		"HasReport":     hasReport,
 		"UpstreamModel": upstreamModel,
-		"AgentRoles":    agentRoles,
+		"AgentNames":    agentNames,
 	})
 }
 
@@ -593,13 +593,13 @@ func (d *Dashboard) messagesPartial(w http.ResponseWriter, r *http.Request) {
 		sessionStatus = session.Status
 	}
 
-	agentRoles, _ := d.store.GetSessionAgentRoles(sessionID)
+	agentNames, _ := d.store.GetSessionAgentNames(sessionID)
 
 	d.render(w, "messages_partial", map[string]any{
 		"Messages":      messages,
 		"SortMode":      sortMode,
 		"AgentFilter":   agentFilter,
-		"AgentRoles":    agentRoles,
+		"AgentNames":    agentNames,
 		"Page":          page,
 		"TotalPages":    totalPages,
 		"Total":         total,

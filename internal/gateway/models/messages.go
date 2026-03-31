@@ -1,13 +1,14 @@
 package models
 
 type Message struct {
-	Role         string     `json:"role"`
-	Content      string     `json:"content,omitempty"`
-	Name         string     `json:"name,omitempty"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID   string     `json:"tool_call_id,omitempty"`
-	AgentRole    string     `json:"agent_role,omitempty"`
-	AgentName    string     `json:"agent_name,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	AgentRole        string     `json:"agent_role,omitempty"`
+	AgentName        string     `json:"agent_name,omitempty"`
 }
 
 type ToolCall struct {
@@ -49,10 +50,16 @@ type Choice struct {
 	FinishReason string `json:"finish_reason"`
 }
 
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+	Cost                    *float64                 `json:"cost,omitempty"`
 }
 
 type ChatCompletionResponse struct {

@@ -15,6 +15,7 @@ type Config struct {
 	Knowledge *KnowledgeConfig `yaml:"knowledge,omitempty"`
 	DefaultMaxIterations int                    `yaml:"default_max_iterations,omitempty"`
 	Agents               map[string]AgentProfile `yaml:"agents,omitempty"`
+	SkillsDir            string                  `yaml:"skills_dir,omitempty"`
 }
 
 type KnowledgeConfig struct {

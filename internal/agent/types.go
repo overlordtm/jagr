@@ -73,3 +73,10 @@ type StatusUpdate struct {
 	FindingID string `json:"finding_id"`
 	Status    string `json:"status"`
 }
+
+// Skill represents a reusable instruction/procedure loaded from the gateway.
+type Skill struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Content     string `json:"content"`
+}

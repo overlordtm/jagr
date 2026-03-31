@@ -11,6 +11,15 @@
             },
             "command": "go run ./cmd/agent --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key --mode batch --tls-skip-verify"
         },
+                {
+            "label": "agent@vulnbox",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "go run ./cmd/agent/ --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key --mode batch --tls-skip-verify --remote vuln-box"
+        },
+        
         {
             "label": "gateway",
             "type": "shell",

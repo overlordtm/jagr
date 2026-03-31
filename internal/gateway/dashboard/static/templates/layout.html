@@ -221,34 +221,23 @@ function switchAgentTab(btn, tab) {
     <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <h2 class="text-base font-semibold text-white shrink-0">Messages</h2>
         <div class="flex items-center gap-3 flex-wrap justify-end">
-            {{if and .AgentRoles (gt (len .AgentRoles) 1)}}
-            <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
-                <button class="msg-agent-filter-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
-                        hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&agent=&page=1"
-                        hx-target="#messages-list"
-                        hx-swap="innerHTML"
-                        data-agent="">All</button>
-                {{range .AgentRoles}}
-                <button class="msg-agent-filter-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
-                        hx-get="/partials/agents/{{$.Agent.ID}}/sessions/{{$.Session.ID}}/messages?sort=chronological&agent={{.}}&page=1"
-                        hx-target="#messages-list"
-                        hx-swap="innerHTML"
-                        data-agent="{{.}}">{{.}}</button>
+            {{if and .AgentNames (gt (len .AgentNames) 1)}}
+            <select class="msg-agent-filter bg-gray-800 text-xs font-medium text-white rounded-lg px-2.5 py-1.5 border border-gray-700 focus:outline-none focus:border-gray-600"
+                    onchange="var sort=document.querySelector('.msg-sort-btn.bg-gray-700'); htmx.ajax('GET', '/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=' + (sort ? sort.dataset.sort : 'chronological') + '&agent=' + encodeURIComponent(this.value) + '&page=1', {target:'#messages-list', swap:'innerHTML'})">
+                <option value="">All Agents</option>
+                {{range .AgentNames}}
+                <option value="{{.}}">{{.}}</option>
                 {{end}}
-            </div>
+            </select>
             {{end}}
             <div class="flex items-center gap-1 bg-gray-800 rounded-lg p-0.5">
                 <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors bg-gray-700 text-white"
-                        hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&agent=&page=1"
-                        hx-target="#messages-list"
-                        hx-swap="innerHTML"
+                        onclick="var f=document.querySelector('.msg-agent-filter'); htmx.ajax('GET', '/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=chronological&agent=' + encodeURIComponent(f ? f.value : '') + '&page=1', {target:'#messages-list', swap:'innerHTML'})"
                         data-sort="chronological">
                     Chronological
                 </button>
                 <button class="msg-sort-btn px-3 py-1 text-xs font-medium rounded-md transition-colors text-gray-400 hover:text-white"
-                        hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent&agent=&page=1"
-                        hx-target="#messages-list"
-                        hx-swap="innerHTML"
+                        onclick="var f=document.querySelector('.msg-agent-filter'); htmx.ajax('GET', '/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/messages?sort=agent&agent=' + encodeURIComponent(f ? f.value : '') + '&page=1', {target:'#messages-list', swap:'innerHTML'})"
                         data-sort="agent">
                     By Agent
                 </button>

@@ -114,10 +114,18 @@
         {{if .ToolCallID}}<span class="text-xs font-mono text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{shortID .ToolCallID}}</span>{{end}}
         {{if .Model}}<span class="text-xs text-gray-600 bg-gray-800 rounded px-1.5 py-0.5">{{.Model}}</span>{{end}}
         {{if .TokensIn}}<span class="text-xs text-gray-500 tabular-nums">{{.TokensIn}}+{{.TokensOut}} tok</span>{{end}}
+        {{if .TokensThinking}}<span class="text-xs text-violet-400/80 tabular-nums">{{.TokensThinking}} thinking</span>{{end}}
         {{if gt .CostUSD 0.0}}<span class="text-xs text-amber-500/80 tabular-nums">{{formatCost .CostUSD}}</span>{{end}}
         {{if .LatencyMs}}<span class="text-xs text-gray-600 tabular-nums">{{.LatencyMs}}ms</span>{{end}}
         <span class="text-xs text-gray-600 ml-auto tabular-nums">{{formatTime .CreatedAt}}</span>
     </div>
+
+    {{if .ReasoningContent}}
+    <details class="pl-1 mb-1">
+        <summary class="text-xs text-violet-400 cursor-pointer hover:text-violet-300 transition-colors">Reasoning</summary>
+        <pre class="mt-1 text-sm text-violet-300/70 bg-violet-950/20 border border-violet-900/30 rounded-md px-3 py-2 max-h-96 overflow-auto whitespace-pre-wrap break-words leading-relaxed">{{.ReasoningContent}}</pre>
+    </details>
+    {{end}}
 
     {{if .Content}}
         {{if eq .Role "tool"}}
@@ -187,10 +195,10 @@
     <div class="rounded-lg border border-gray-800/30 overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-2 bg-gray-800/20 border-b border-gray-800/30">
             <svg class="h-3.5 w-3.5 shrink-0 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-            <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold {{agentColor .AgentRole}}">{{.AgentRole}}</span>
+            <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold {{agentColor .AgentName}}">{{.AgentName}}</span>
             <span class="text-xs text-gray-600">{{len .Messages}} messages</span>
         </div>
-        <div class="divide-y divide-gray-800/50 border-l-2 {{agentBorder .AgentRole}} ml-0">
+        <div class="divide-y divide-gray-800/50 border-l-2 {{agentBorder .AgentName}} ml-0">
             {{range .Messages}}
             {{template "message_item" .}}
             {{end}}
