@@ -9,10 +9,9 @@ Vagrant.configure("2") do |config|
 
     target.vm.network "private_network", ip: '172.28.128.3'
 
-    target.vm.provider "virtualbox" do |v|
-      v.name = "jagr-target"
+    target.vm.provider "libvirt" do |v|
       v.memory = 4096
-      v.cpu = 2
+      v.cpus = 2
     end
 
     target.vm.provision "shell", path: "scripts/setup-vulns.sh"

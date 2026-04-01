@@ -92,6 +92,15 @@ func (s *RollingWindowStrategy) Select(history []Message) []Message {
 		protected[0] = true
 	}
 
+	// Always protect the first user message (the objective) to ensure the API requirement
+	// (at least one user message) is met, and to preserve the agent's primary goal.
+	for i := 0; i < n; i++ {
+		if history[i].Role == "user" {
+			protected[i] = true
+			break
+		}
+	}
+
 	// Collect messages that need compression.
 	var toCompress []Message
 	for i, msg := range history {

@@ -247,7 +247,7 @@ fi
 # World-writable sensitive files
 chmod 666 /etc/passwd
 chmod 666 /etc/crontab
-chmod 777 /etc/sudoers.d 2>/dev/null || true
+# chmod 777 /etc/sudoers.d 2>/dev/null || true
 
 # World-writable /etc/shadow (extreme)
 chmod 664 /etc/shadow 2>/dev/null || true

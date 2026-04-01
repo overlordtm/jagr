@@ -98,7 +98,11 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 	args = rewriteArg(args, "--output-dir", remoteOutputDir)
 
 	// Build remote command
-	cmdParts := []string{remotePath}
+	var cmdParts []string
+	if cfg.User != "root" {
+		cmdParts = append(cmdParts, "sudo")
+	}
+	cmdParts = append(cmdParts, remotePath)
 	cmdParts = append(cmdParts, args...)
 	remoteCmd := strings.Join(cmdParts, " ")
 

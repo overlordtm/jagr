@@ -37,8 +37,8 @@ func NewAiAgent(harness *JagrHarness, name, role, systemPrompt, objective string
 	harness.gateway.RegisterProfile(role)
 
 	strategy := &RollingWindowStrategy{
-		MaxRawMessages: 10,
-		MaxToolCalls:   5,
+		MaxRawMessages: 15,
+		MaxToolCalls:   10,
 		Summarize:      NewGatewaySummarizer(harness.gateway, role, name),
 	}
 	// ctx := NewContextMagic(nil)

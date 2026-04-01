@@ -11,15 +11,22 @@
             },
             "command": "go run ./cmd/agent --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key --mode batch --tls-skip-verify"
         },
-                {
-            "label": "agent@vulnbox",
+        {
+            "label": "agent@vuln-box",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
             "command": "go run ./cmd/agent/ --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key --mode batch --tls-skip-verify --remote vuln-box"
         },
-        
+        {
+            "label": "agent@jagr-target",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "command": "go run ./cmd/agent/ --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key --mode batch --tls-skip-verify --remote jagr-target"
+        },
         {
             "label": "gateway",
             "type": "shell",
