@@ -204,3 +204,29 @@ jobs:
           file: gateway/Dockerfile
           push: true
           tags: ghcr.io/${{ github.repository }}:nightly,ghcr.io/${{ github.repository }}:latest
+
+  nightly-release:
+    runs-on: ubuntu-latest
+    needs: [nightly-agent, nightly-gateway]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-binaries-nightly-*
+          path: dist/
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: gateway-binaries-nightly
+          path: dist/
+      - name: Publish nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          prerelease: true
+          make_latest: false
+          body: "Automated nightly build from `main`. Updated: ${{ github.run_id }}"
+          files: dist/*
