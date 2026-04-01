@@ -771,12 +771,13 @@ func (s *Store) CreateMemo(exerciseID, sessionID, host, scope, content, memoType
 		memoType = "observation"
 	}
 
+	now := time.Now().UTC()
 	var memo models.Memo
 	err := s.db.QueryRow(`
-		INSERT INTO memos (exercise_id, session_id, host, scope, content, memo_type, agent_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memos (exercise_id, session_id, host, scope, content, memo_type, agent_name, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id, exercise_id, session_id, host, scope, content, memo_type, agent_name, created_at
-	`, exerciseID, sessionID, host, scope, content, memoType, agentName).Scan(
+	`, exerciseID, sessionID, host, scope, content, memoType, agentName, now).Scan(
 		&memo.ID, &memo.ExerciseID, &memo.SessionID, &memo.Host,
 		&memo.Scope, &memo.Content, &memo.MemoType, &memo.AgentName, &memo.CreatedAt,
 	)
