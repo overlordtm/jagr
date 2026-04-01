@@ -39,9 +39,9 @@ Jagr is an autonomous, AI-driven security engineer designed for deep inspection 
    │         JAGR AGENT            │
    │  (target host, runs as root)  │
    │  ┌───────────┐  ┌───────────┐ │
-   │  │  Clean    │  │  ReAct    │ │
-   │  │  Room     │  │  Loop     │ │
-   │  │ (/dev/shm)│  │  Engine   │ │
+   │  │  Clean    │  │  Multi-   │ │
+   │  │  Room     │  │  Phase    │ │
+   │  │ (/dev/shm)│  │  Harness  │ │
    │  └───────────┘  └───────────┘ │
    │  ┌───────────┐  ┌───────────┐ │
    │  │ Embedded  │  │  OpenAI   │ │
@@ -59,12 +59,17 @@ Jagr is an autonomous, AI-driven security engineer designed for deep inspection 
 - **OpenAI-Compatible** — Works with any OpenAI-compatible LLM provider
 - **Multi-Agent Support** — Central gateway manages multiple concurrent agents
 - **Full Audit Trail** — SQLite-based logging of all activities
-- **Intelligent Tooling** — ReAct loop with LinPEAS, pspy, and custom tools
+- **Intelligent Tooling** — Multi-phase parallel investigation with LinPEAS, pspy, and custom tools
 - **Web Dashboard** — Real-time monitoring of exercises, agents, sessions, and cost tracking
 - **Cost Tracking** — Automatic per-model pricing via OpenRouter with per-session cost aggregation
 - **ACME / Auto-TLS** — Optional Let's Encrypt integration; auto-generates self-signed certs as fallback
 - **Circuit Breaker** — Per-tool failure tracking prevents runaway loops on broken tools
 - **Session Heartbeats** — Agents send periodic heartbeats so the gateway can detect stale sessions
+- **Remote Execution** — Copy and execute agent on remote hosts over SSH with automatic reverse tunnel
+- **Context Management** — Rolling-window summarization strategy keeps long sessions within token budgets
+- **Host Enrichment** — Automatic pre-flight context collection (users, cron, SUID, listeners, systemd)
+- **Knowledge Base (RAG)** — Optional document store for exercise baselines, ingestable via CLI
+- **Production Builds** — xz-compressed embedded tools and stripped binaries for minimal binary size
 
 ## Building
 
@@ -75,6 +80,14 @@ make all
 # Or build individually
 make build-agent
 make build-gateway
+
+# Production builds (stripped + xz-compressed tools, smallest binary)
+make build-prod
+make build-agent-prod
+make build-gateway-prod
+
+# Compress embedded tools separately
+make compress-tools
 
 # Fetch tools separately (BusyBox is built from source via submodule)
 make fetch-tools
@@ -88,7 +101,14 @@ The gateway build includes a Vite-based web dashboard (`web/`). The `build-gatew
 
 ### Configuration
 
-Create a `gateway.yaml` file:
+The example config file is `gateway.example.yaml`. Copy and customize it:
+
+```bash
+cp gateway.example.yaml gateway.yaml
+# Edit gateway.yaml as needed
+```
+
+Key sections:
 
 ```yaml
 server:
@@ -125,6 +145,13 @@ providers:
     models:
       - alias: "default"
         upstream: "anthropic/claude-sonnet-4"
+        max_context_window: 200000
+      - alias: "fast"
+        upstream: "anthropic/claude-haiku-4"
+        max_context_window: 200000
+      - alias: "summarize"
+        upstream: "google/gemini-flash-1.5"
+        max_context_window: 1000000
 
 default_provider: openrouter
 default_model: default
@@ -136,6 +163,28 @@ dashboard:
   #   - username: admin
   #     password: changeme
 
+# Agent profiles — override model/temperature per investigation phase
+agents:
+  phase_UserAccess:
+    model: "fast"
+    temperature: 0.1
+    top_p: 0.95
+  phase_Persistence:
+    model: "fast"
+
+# Knowledge base (RAG) for exercise documentation retrieval
+# knowledge:
+#   backend: chromem          # "chromem" (embedded) or "redis"
+#   data_dir: /var/lib/jagr/knowledge
+#   embedding:
+#     provider: openai_compatible
+#     model: text-embedding-3-small
+#     base_url: https://openrouter.ai/api/v1
+#     api_key: ${OPENROUTER_API_KEY}
+
+# Skills directory — files become skills available to all agents
+# skills_dir: /etc/jagr/skills
+
 timeouts:
   provider_timeout_seconds: 300
   pricing_fetch_timeout_seconds: 30
@@ -145,18 +194,44 @@ logging:
   audit: true
 ```
 
+Environment variables are expanded in the config (e.g. `${OPENROUTER_API_KEY}`). Use a `.env` file with `direnv` or export them manually.
+
 ### Running
 
 ```bash
-# Start with default config
+# Start with default config (gateway.yaml)
 ./jagr-gateway
 
 # With custom config
 ./jagr-gateway --config custom.yaml
 
+# Human-readable console logging (useful for development)
+./jagr-gateway --config gateway.yaml --log-format console
+
 # Verbose logging
 ./jagr-gateway --verbose
+
+# Using direnv (loads .env automatically)
+direnv exec . ./jagr-gateway --config gateway.yaml --log-format console
 ```
+
+### Knowledge Base Ingest
+
+Use the `ingest` subcommand to load documents into the RAG knowledge base:
+
+```bash
+# Ingest a directory of markdown files
+./jagr-gateway ingest --config gateway.yaml /path/to/exercise-docs/
+
+# Ingest specific files into a named collection
+./jagr-gateway ingest --config gateway.yaml --collection network-baseline \
+  /etc/network/interfaces /etc/hosts
+
+# Control chunk size (characters per chunk, 0 = no chunking)
+./jagr-gateway ingest --config gateway.yaml --chunk-size 4000 /path/to/docs/
+```
+
+Supported file types: `.md`, `.txt`, `.yaml`, `.yml`, `.json`, `.conf`, `.cfg`, `.ini`, `.toml`, `.sh`, `.py`, `.go`
 
 ### API Endpoints
 
@@ -180,32 +255,49 @@ When `dashboard.enabled` is `true`, the gateway serves a web UI on the configure
 
 ## Agent
 
+### How It Works
+
+The agent runs a **multi-phase parallel investigation**. After collecting host context (users, cron jobs, SUID binaries, open ports, systemd units), it spawns five concurrent phase agents:
+
+| Phase | Focus |
+|-------|-------|
+| `UserAccess` | Backdoor accounts, sudo misconfigurations, SSH keys |
+| `Persistence` | Cron, systemd timers, rc.local, init.d, shell profiles |
+| `Network` | Firewall, open ports, routing, DNS, network config |
+| `Filesystem` | SUID/SGID/capabilities, world-writable paths, LD_PRELOAD |
+| `LogAnalysis` | Auth logs, wtmp, bash history, log tampering |
+
+After all phases complete, a reporter agent consolidates findings into structured output.
+
 ### Usage
 
 ```bash
 jagr-agent [flags]
 
 Flags:
-  --gateway-url          string   Gateway server URL (required, or JAGR_GATEWAY_URL env)
-  --api-key              string   API key for gateway auth (or JAGR_API_KEY env)
-  --mode                 string   Execution mode: batch | interactive (default: interactive)
-  --max-iterations       int      Maximum ReAct loop iterations (default: 50)
-  --max-tool-failures    int      Max consecutive failures per tool before circuit breaker trips (default: 5)
-  --model                string   Model alias to request from gateway (default: "default")
-  --objective            string   Custom objective prompt
-  --output-dir           string   Directory for reports (default: ./jagr-output)
-  --verbose              bool     Verbose local logging (default: false)
-  --hostname             string   Override hostname detection
-  --tls-skip-verify      bool     Skip TLS certificate verification (default: false)
-  --http-timeout         int      HTTP request timeout in seconds (default: 120)
-  --command-timeout       int      Default command execution timeout in seconds (default: 300)
-  --long-command-timeout  int      Long-running command timeout in seconds (default: 900)
+  --gateway-url          string   Gateway server URL (required) (env: JAGR_GATEWAY_URL)
+  --api-key              string   API key for gateway auth (env: JAGR_API_KEY)
+  --mode                 string   Execution mode: batch | interactive (default: interactive) (env: JAGR_MODE)
+  --max-iterations       int      Maximum ReAct loop iterations per phase agent (default: 50) (env: JAGR_MAX_ITERATIONS)
+  --max-tool-failures    int      Max consecutive failures per tool before circuit breaker trips (default: 5) (env: JAGR_MAX_TOOL_FAILURES)
+  --model                string   Model alias to request from gateway (default: "default") (env: JAGR_MODEL)
+  --objective            string   Custom objective prompt (env: JAGR_OBJECTIVE)
+  --output-dir           string   Directory for reports; hostname subdirectory created automatically (default: ./jagr-output) (env: JAGR_OUTPUT_DIR)
+  --verbose              bool     Verbose local logging (default: false) (env: JAGR_VERBOSE)
+  --hostname             string   Override hostname detection (env: JAGR_HOSTNAME)
+  --tls-skip-verify      bool     Skip TLS certificate verification (default: false) (env: JAGR_TLS_SKIP_VERIFY)
+  --http-timeout         int      HTTP request timeout in seconds (default: 120) (env: JAGR_HTTP_TIMEOUT)
+  --command-timeout       int     Default command execution timeout in seconds (default: 300) (env: JAGR_COMMAND_TIMEOUT)
+  --long-command-timeout  int     Long-running command timeout in seconds (default: 900) (env: JAGR_LONG_COMMAND_TIMEOUT)
+  --remote               string   SSH into this host, copy the agent binary there, and execute remotely (env: JAGR_REMOTE)
 ```
+
+All flags can be set via environment variables (shown in parentheses above).
 
 ### Examples
 
 ```bash
-# Run autonomous audit
+# Run autonomous audit against local host
 JAGR_API_KEY=your-api-key jagr-agent --gateway-url https://gateway.example.com --mode batch
 
 # Interactive mode with human oversight
@@ -220,7 +312,22 @@ export JAGR_GATEWAY_URL=https://gateway.example.com
 export JAGR_API_KEY=your-api-key
 export JAGR_TLS_SKIP_VERIFY=true
 jagr-agent --mode batch
+
+# Run agent on a remote host via SSH (binary is copied automatically)
+# Reads ~/.ssh/config for host resolution; establishes reverse tunnel for gateway access
+jagr-agent --gateway-url https://gateway.example.com --api-key $KEY \
+  --mode batch --tls-skip-verify --remote vuln-box
+
+# Remote execution using a specific SSH alias from ~/.ssh/config
+jagr-agent --gateway-url https://gateway.example.com --api-key $KEY \
+  --mode batch --tls-skip-verify --remote jagr-target
 ```
+
+### Remote Execution
+
+The `--remote <host>` flag enables agentless deployment: Jagr copies its own binary to the target over SSH and executes it there. A reverse SSH tunnel is automatically established so the remote agent can reach the gateway through the launching host — no direct network path from target to gateway is required.
+
+Host resolution follows `~/.ssh/config` (Hostname, Port, User, IdentityFile). SSH agent and default key paths (`~/.ssh/id_rsa`, `id_ed25519`, `id_ecdsa`) are tried automatically. Artifacts are collected back to `--output-dir` after the run.
 
 ### Command Reference
 
@@ -245,7 +352,7 @@ jagr-agent --mode batch
 - **LinPEAS** — Privilege escalation checks (downloaded at build time via `make fetch-tools`)
 - **pspy** — Process monitoring (downloaded at build time)
 
-Tools are embedded via Go's `embed.FS` and extracted at runtime to the Clean Room.
+Tools are embedded via Go's `embed.FS` and extracted at runtime to the Clean Room. Production builds (`build-agent-prod`) compress tools with xz (`-9`) before embedding to minimize binary size; decompression happens transparently at startup.
 
 ## Security Considerations
 
@@ -280,7 +387,63 @@ At conclusion, the agent produces:
 2. **report.md** — Human-readable Markdown report
 3. **jagr-events.jsonl** — Full local audit trail
 
-## Developing
+Output is written to `<output-dir>/<hostname>/` so multiple targets can share a single output directory.
+
+## Development
+
+### Local Development Setup
+
+The repo ships with `direnv` support. Copy `.env.example` to `.env`, fill in your API keys, and run `direnv allow`:
+
+```bash
+cp .env.example .env
+# Set OPENROUTER_API_KEY in .env
+direnv allow
+```
+
+Port forwarding is pre-configured in `.devcontainer/devcontainer.json`:
+
+| Port | Service |
+|------|---------|
+| 8443 | JAGR Gateway API |
+| 8080 | JAGR Dashboard |
+| 5173 | Vite Dev Server |
+
+### Running Locally (VS Code Tasks)
+
+The following tasks are defined in `.vscode/tasks.json` and can be run via **Terminal → Run Task**:
+
+```bash
+# Start the gateway (loads env via direnv, human-readable logs)
+direnv exec . go run ./cmd/gateway --config gateway.yaml --log-format console
+
+# Run agent against local gateway (batch mode, skip TLS verify for dev cert)
+go run ./cmd/agent --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key \
+  --mode batch --tls-skip-verify
+
+# Run agent targeting a remote host named "vuln-box" (via SSH)
+go run ./cmd/agent/ --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key \
+  --mode batch --tls-skip-verify --remote vuln-box
+
+# Run agent targeting the Vagrant VM "jagr-target"
+go run ./cmd/agent/ --gateway-url https://127.0.0.1:8443 --api-key jagr-dev-key \
+  --mode batch --tls-skip-verify --remote jagr-target
+
+# Start Vite dev server for dashboard development
+cd web && npm run dev
+```
+
+### Vagrant Test Target
+
+A `Vagrantfile` is included to spin up a vulnerable Ubuntu 22.04 VM for local testing:
+
+```bash
+vagrant up        # provision jagr-target at 172.28.128.3
+vagrant ssh       # inspect the target manually
+vagrant destroy   # tear down
+```
+
+The VM is provisioned by `scripts/setup-vulns.sh`, which plants ~50 vulnerabilities across users, persistence, SUID, file permissions, credentials, network, and more. See [scripts/README.md](scripts/README.md) for the full list.
 
 ### Project Structure
 
@@ -291,26 +454,42 @@ jagr/
 │   └── agent/              # Agent entry point
 ├── internal/
 │   ├── gateway/            # Gateway components
-│   │   ├── db/             # SQLite storage
+│   │   ├── db/             # SQLite storage + migrations
 │   │   ├── models/         # Data models & config
 │   │   ├── provider/       # LLM provider routing & pricing
+│   │   ├── knowledge/      # RAG knowledge base (chromem backend)
 │   │   └── dashboard/      # Web dashboard (embedded HTML/JS/CSS)
 │   └── agent/              # Agent components
-│       ├── cleanroom.go    # Trusted execution
+│       ├── harness.go      # Multi-phase investigation orchestrator
+│       ├── aiagent.go      # Per-phase ReAct engine
+│       ├── cleanroom.go    # Trusted execution environment
+│       ├── remote.go       # SSH remote execution + reverse tunnel
+│       ├── gateway_client.go # Gateway HTTP client
 │       ├── tools.go        # Tool definitions
-│       └── agent.go        # ReAct engine
+│       ├── toolbox.go      # Tool execution handlers
+│       ├── prompts/        # Embedded prompt templates (per phase/role)
+│       ├── enrichment/     # Host context collection modules
+│       ├── context_budget.go   # Tool output truncation
+│       ├── context_strategy.go # Rolling-window summarization
+│       └── findings_store.go   # Finding accumulation
 ├── external/
 │   └── busybox/            # BusyBox submodule (built from source)
 ├── web/                    # Dashboard frontend (Vite + JS)
+├── scripts/
+│   ├── setup-vulns.sh      # Vagrant provisioner — plants vulnerabilities
+│   └── README.md           # Vulnerability catalogue
+├── Vagrantfile             # Vagrant VM for local testing
 ├── Makefile                # Build, fetch-tools, cross-compile
-└── gateway.yaml.example    # Config template
+├── gateway.example.yaml    # Config template (was gateway.yaml.example)
+├── .envrc                  # direnv: loads .env, sets up Go layout
+└── .env.example            # Environment variable template
 ```
 
 ### Adding New Tools
 
 1. Add tool binary/file to `internal/agent/tools/`
 2. Add tool to `GetAvailableTools()` in `internal/agent/tools.go`
-3. Add execution handler in `internal/agent/agent.go`
+3. Add execution handler in `internal/agent/toolbox.go`
 
 ### Adding New Providers
 
@@ -323,6 +502,12 @@ type Provider interface {
 ```
 
 Add provider to config's `providers` array with appropriate type.
+
+### Adding New Investigation Phases
+
+1. Create a prompt file at `internal/agent/prompts/phase_<Name>.md`
+2. Add `"<Name>"` to the `phases` slice in `internal/agent/harness.go`
+3. Optionally add an agent profile in `gateway.yaml` under `agents.phase_<Name>`
 
 ## License
 
