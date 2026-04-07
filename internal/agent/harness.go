@@ -77,6 +77,8 @@ func (h *JagrHarness) Run() error {
 
 	hostContext := h.collectHostContext()
 
+	systemOverview := h.runSystemOverview(hostContext)
+
 	phases := []string{
 		"UserAccess",
 		"Persistence",
@@ -96,7 +98,15 @@ func (h *JagrHarness) Run() error {
 			continue
 		}
 
-		objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nBegin your investigation phase.", hostContext)
+		var objBuilder strings.Builder
+		objBuilder.WriteString("## Target Host Context\n\n")
+		objBuilder.WriteString(hostContext)
+		if systemOverview != "" {
+			objBuilder.WriteString("\n\n## System Overview\n\n")
+			objBuilder.WriteString(systemOverview)
+		}
+		objBuilder.WriteString("\n\nBegin your investigation phase.")
+		objective := objBuilder.String()
 		agent := NewAiAgent(h, role, role, prompt, objective, GetToolsForRole(role))
 
 		wg.Add(1)
@@ -148,6 +158,47 @@ func (h *JagrHarness) Run() error {
 
 // defaultInvestigatorMaxIter is the fallback cap for investigator agents.
 const defaultInvestigatorMaxIter = 50
+
+// runSystemOverview ensures a system_overview memo exists for the host.
+// It first checks for an existing memo; if none is found, it launches a
+// dedicated system_overview agent to profile the host and write one.
+// Returns the overview content, or empty string on failure.
+func (h *JagrHarness) runSystemOverview(hostContext string) string {
+	const memoType = "system_overview"
+
+	content, found, err := h.gateway.FetchMemoByType(memoType, h.gateway.Hostname())
+	if err != nil {
+		h.logger.Warn("Failed to fetch system_overview memo", zap.Error(err))
+	}
+	if found {
+		h.logger.Info("System overview memo found, loading into context")
+		return content
+	}
+
+	h.logger.Info("No system_overview memo found, launching system_overview agent")
+	prompt, err := GetPrompt("system_overview", nil)
+	if err != nil {
+		h.logger.Error("Failed to load system_overview prompt", zap.Error(err))
+		return ""
+	}
+	objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nDetermine the purpose of this system and identify all network-exposed services. Write your findings as a memo with type 'system_overview'.", hostContext)
+	agent := NewAiAgent(h, "system_overview", "system_overview", prompt, objective, GetToolsForRole("system_overview"))
+	if err := agent.Run(); err != nil {
+		h.logger.Error("system_overview agent failed", zap.Error(err))
+		return ""
+	}
+
+	content, found, err = h.gateway.FetchMemoByType(memoType, h.gateway.Hostname())
+	if err != nil {
+		h.logger.Warn("Failed to fetch system_overview memo after agent run", zap.Error(err))
+		return ""
+	}
+	if !found {
+		h.logger.Warn("system_overview agent completed but memo not found")
+		return ""
+	}
+	return content
+}
 
 func (h *JagrHarness) runInvestigator(target, contextStr string) error {
 	name := fmt.Sprintf("investigator-%d", atomic.AddInt64(&h.investigatorCounter, 1))

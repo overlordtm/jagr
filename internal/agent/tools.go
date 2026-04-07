@@ -355,6 +355,12 @@ func GetToolsForRole(role string) []Tool {
 	case "reporter":
 		// Reporter only needs file reading/writing and conclude
 		return filterTools(allTools, []string{"read_file", "write_file", "conclude"})
+	case "system_overview":
+		return filterTools(allTools, []string{
+			"execute_trusted", "read_file", "list_dir",
+			"get_system_env", "get_network_info", "check_listeners",
+			"check_systemd", "write_memo", "conclude",
+		})
 	case "investigator":
 		// Investigator does the deep dive, needs full access but not delegation
 		return filterTools(allTools, []string{

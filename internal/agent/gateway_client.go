@@ -436,6 +436,46 @@ func (gc *GatewayClient) SubmitAgentSettings() {
 	gc.logger.Info("Agent settings submitted to gateway", zap.Int("count", count))
 }
 
+// FetchMemoByType retrieves the most recent memo of a given type for a host.
+// Returns the content, a found flag, and any error. Returns ("", false, nil) when no memo exists.
+func (gc *GatewayClient) FetchMemoByType(memoType, host string) (string, bool, error) {
+	url := gc.gatewayURL + "/v1/memos?scope=host&memo_type=" + memoType + "&limit=1"
+	if host != "" {
+		url += "&host=" + host
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to create fetch memo request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
+	req.Header.Set("X-Hostname", gc.hostname)
+
+	resp, err := gc.httpClient.Do(req)
+	if err != nil {
+		return "", false, fmt.Errorf("fetch memo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("fetch memo failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var memos []struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &memos); err != nil {
+		return "", false, fmt.Errorf("failed to parse memos response: %w", err)
+	}
+
+	if len(memos) == 0 {
+		return "", false, nil
+	}
+
+	return memos[0].Content, true, nil
+}
+
 // WriteMemo creates a memo on the gateway and returns the JSON response.
 func (gc *GatewayClient) WriteMemo(scope, content, memoType, host, agentName string) (string, error) {
 	payload := map[string]string{
