@@ -57,22 +57,8 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 	}
 	defer client.Close()
 
-	// Set up reverse tunnel for gateway if URL is provided
-	if gatewayURL != "" {
-		tunnelURL, cleanup, err := setupReverseTunnel(client, logger, gatewayURL)
-		if err != nil {
-			return fmt.Errorf("setup reverse tunnel: %w", err)
-		}
-		defer cleanup()
-
-		// Rewrite --gateway-url in args to point through the tunnel
-		args = rewriteArg(args, "--gateway-url", tunnelURL)
-		logger.Info("Reverse tunnel established",
-			zap.String("original_gateway", gatewayURL),
-			zap.String("tunnel_gateway", tunnelURL))
-	}
-
-	// Get path to our own binary
+	// Copy our binary to the remote host first — the stdio tunnel fallback
+	// needs to invoke it before the main agent command runs.
 	selfPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("get executable path: %w", err)
@@ -90,6 +76,21 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 
 	if err := scpCopy(client, selfPath, remotePath); err != nil {
 		return fmt.Errorf("scp copy: %w", err)
+	}
+
+	// Set up a tunnel so the remote agent can reach the gateway.
+	if gatewayURL != "" {
+		tunnelURL, cleanup, err := setupReverseTunnel(client, logger, gatewayURL, remotePath)
+		if err != nil {
+			return fmt.Errorf("setup gateway tunnel: %w", err)
+		}
+		defer cleanup()
+
+		// Rewrite --gateway-url in args to point through the tunnel
+		args = rewriteArg(args, "--gateway-url", tunnelURL)
+		logger.Info("Gateway tunnel established",
+			zap.String("original_gateway", gatewayURL),
+			zap.String("tunnel_gateway", tunnelURL))
 	}
 
 	// Use a fixed remote output directory; the agent will create the hostname
@@ -123,10 +124,11 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 	return execErr
 }
 
-// setupReverseTunnel creates a reverse SSH tunnel so the remote agent can reach
-// the gateway through the launching host. It returns the rewritten URL
-// (e.g. "https://127.0.0.1:43210") and a cleanup function.
-func setupReverseTunnel(client *ssh.Client, logger *zap.Logger, gatewayURL string) (string, func(), error) {
+// setupReverseTunnel creates a tunnel so the remote agent can reach the gateway
+// through the launching host. It first tries an SSH reverse tunnel (tcpip-forward);
+// if the server denies that, it falls back to a local listener on the interface
+// the SSH connection uses (the remote agent then connects directly to that IP).
+func setupReverseTunnel(client *ssh.Client, logger *zap.Logger, gatewayURL string, remoteBinPath string) (string, func(), error) {
 	parsed, err := url.Parse(gatewayURL)
 	if err != nil {
 		return "", nil, fmt.Errorf("parse gateway URL %q: %w", gatewayURL, err)
@@ -143,10 +145,15 @@ func setupReverseTunnel(client *ssh.Client, logger *zap.Logger, gatewayURL strin
 		}
 	}
 
-	// Open a listener on the remote side (port 0 = OS picks a free port)
+	// Try reverse tunnel: SSH server on remote listens and forwards here.
 	remoteListener, err := client.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", nil, fmt.Errorf("open remote listener: %w", err)
+		// tcpip-forward denied (AllowTcpForwarding disabled on the server).
+		// Fall back: bind a local listener and have the remote agent connect
+		// to our IP directly.
+		logger.Warn("Remote TCP forwarding denied by SSH server, falling back to local listener",
+			zap.Error(err))
+		return setupLocalListenerFallback(client, logger, parsed, gwHost, remoteBinPath)
 	}
 
 	remoteAddr := remoteListener.Addr().String()
@@ -154,7 +161,6 @@ func setupReverseTunnel(client *ssh.Client, logger *zap.Logger, gatewayURL strin
 		zap.String("remote_addr", remoteAddr),
 		zap.String("local_target", gwHost))
 
-	// Proxy goroutine: accept connections on remote side, forward to local gateway
 	go func() {
 		for {
 			remoteConn, err := remoteListener.Accept()
@@ -165,17 +171,127 @@ func setupReverseTunnel(client *ssh.Client, logger *zap.Logger, gatewayURL strin
 		}
 	}()
 
-	// Build the tunnel URL preserving the original scheme and path
 	tunnelURL := fmt.Sprintf("%s://%s", parsed.Scheme, remoteAddr)
 	if parsed.Path != "" && parsed.Path != "/" {
 		tunnelURL += parsed.Path
 	}
 
-	cleanup := func() {
-		remoteListener.Close()
+	return tunnelURL, func() { remoteListener.Close() }, nil
+}
+
+// setupLocalListenerFallback binds a TCP listener on the local interface used
+// by the SSH connection. The remote agent connects to that IP:port directly
+// (not through the SSH channel) and traffic is proxied to the gateway.
+// This requires the launching host to be TCP-reachable from the remote on the
+// chosen port, but does not require AllowTcpForwarding on the SSH server.
+func setupLocalListenerFallback(client *ssh.Client, logger *zap.Logger, parsed *url.URL, gwHost string, remoteBinPath string) (string, func(), error) {
+	localIP, _, err := net.SplitHostPort(client.LocalAddr().String())
+	if err != nil {
+		return "", nil, fmt.Errorf("determine local IP from SSH connection: %w", err)
 	}
 
-	return tunnelURL, cleanup, nil
+	ln, err := net.Listen("tcp", net.JoinHostPort(localIP, "0"))
+	if err != nil {
+		return "", nil, fmt.Errorf("local fallback listener: %w", err)
+	}
+
+	logger.Info("Local fallback listener opened",
+		zap.String("local_addr", ln.Addr().String()),
+		zap.String("local_target", gwHost))
+
+	// Verify the remote can actually reach our local IP.  We do this by
+	// checking whether the remote has a route to our address.  If not, fall
+	// through to the stdio tunnel which works over any topology.
+	if !remoteCanReach(client, localIP) {
+		ln.Close()
+		logger.Warn("Remote has no route to local IP, falling back to stdio tunnel",
+			zap.String("local_ip", localIP))
+		return setupStdioTunnel(client, logger, parsed, gwHost, remoteBinPath)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			go forwardConnection(conn, gwHost, logger)
+		}
+	}()
+
+	tunnelURL := fmt.Sprintf("%s://%s", parsed.Scheme, ln.Addr().String())
+	if parsed.Path != "" && parsed.Path != "/" {
+		tunnelURL += parsed.Path
+	}
+
+	return tunnelURL, func() { ln.Close() }, nil
+}
+
+// remoteCanReach returns true when the remote host has a route to addr.
+func remoteCanReach(client *ssh.Client, addr string) bool {
+	session, err := client.NewSession()
+	if err != nil {
+		return false
+	}
+	defer session.Close()
+	// "ip route get" exits non-zero when there is no route.
+	err = session.Run(fmt.Sprintf("ip route get %s", addr))
+	return err == nil
+}
+
+// setupStdioTunnel starts the already-copied jagr binary on the remote host in
+// hidden stdio-tunnel mode via a second SSH exec session. The remote binary
+// listens on a loopback port and multiplexes connections back to us over the
+// session's stdin/stdout. We proxy those streams to the local gateway.
+//
+// This works regardless of network topology or AllowTcpForwarding settings
+// because it reuses the existing SSH TCP connection as the transport.
+func setupStdioTunnel(client *ssh.Client, logger *zap.Logger, parsed *url.URL, gwHost string, remoteBinPath string) (string, func(), error) {
+	const tunnelLoopbackPort = 17537
+
+	session, err := client.NewSession()
+	if err != nil {
+		return "", nil, fmt.Errorf("new stdio-tunnel session: %w", err)
+	}
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		session.Close()
+		return "", nil, fmt.Errorf("stdio-tunnel stdin pipe: %w", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		session.Close()
+		return "", nil, fmt.Errorf("stdio-tunnel stdout pipe: %w", err)
+	}
+
+	cmd := fmt.Sprintf("%s --stdio-tunnel=127.0.0.1:%d", remoteBinPath, tunnelLoopbackPort)
+	if err := session.Start(cmd); err != nil {
+		session.Close()
+		return "", nil, fmt.Errorf("start stdio-tunnel command: %w", err)
+	}
+
+	// Wait for the server's ready byte before returning, so the remote
+	// listener is up by the time the remote agent tries to connect.
+	ready := make([]byte, 1)
+	if _, err := io.ReadFull(stdout, ready); err != nil || ready[0] != tunnelReady {
+		session.Close()
+		return "", nil, fmt.Errorf("stdio-tunnel server did not signal ready")
+	}
+
+	go RunStdioTunnelClient(stdout, stdin, gwHost, logger)
+
+	tunnelURL := fmt.Sprintf("%s://127.0.0.1:%d", parsed.Scheme, tunnelLoopbackPort)
+	if parsed.Path != "" && parsed.Path != "/" {
+		tunnelURL += parsed.Path
+	}
+
+	logger.Info("Stdio tunnel established",
+		zap.String("remote_bin", remoteBinPath),
+		zap.Int("loopback_port", tunnelLoopbackPort),
+		zap.String("tunnel_url", tunnelURL))
+
+	return tunnelURL, func() { session.Close() }, nil
 }
 
 // forwardConnection proxies a single connection from the remote tunnel to the
@@ -397,8 +513,44 @@ func buildSSHClientConfig(cfg SSHHostConfig) (*ssh.ClientConfig, error) {
 	}, nil
 }
 
+// parseRemoteTarget splits a --remote value of the form [user@]host[:port]
+// into its components. The host part is used for SSH config lookup.
+func parseRemoteTarget(target string) (user, host, port string) {
+	// Extract optional user@ prefix
+	if idx := strings.LastIndex(target, "@"); idx >= 0 {
+		user = target[:idx]
+		target = target[idx+1:]
+	}
+
+	// Extract optional :port suffix, but only when target is not an IPv6
+	// address already wrapped in brackets (e.g. [::1]:22 is handled by
+	// net.SplitHostPort; bare ::1 has no port).
+	if strings.HasPrefix(target, "[") {
+		// Bracketed IPv6: delegate to net.SplitHostPort
+		h, p, err := net.SplitHostPort(target)
+		if err == nil {
+			host = h
+			port = p
+			return
+		}
+	} else if idx := strings.LastIndex(target, ":"); idx >= 0 {
+		// Make sure it's not a bare IPv6 address (multiple colons → no port)
+		if strings.Count(target, ":") == 1 {
+			host = target[:idx]
+			port = target[idx+1:]
+			return
+		}
+	}
+
+	host = target
+	return
+}
+
 // resolveSSHConfig parses ~/.ssh/config to resolve host settings.
-func resolveSSHConfig(host string) (SSHHostConfig, error) {
+// target may be [user@]host[:port]; inline values override SSH config.
+func resolveSSHConfig(target string) (SSHHostConfig, error) {
+	user, host, port := parseRemoteTarget(target)
+
 	cfg := SSHHostConfig{
 		Hostname: host,
 		Port:     "22",
@@ -406,18 +558,23 @@ func resolveSSHConfig(host string) (SSHHostConfig, error) {
 	}
 
 	home, err := os.UserHomeDir()
-	if err != nil {
-		return cfg, nil // use defaults
+	if err == nil {
+		configPath := filepath.Join(home, ".ssh", "config")
+		f, err := os.Open(configPath)
+		if err == nil {
+			parseSSHConfig(f, host, &cfg)
+			f.Close()
+		}
 	}
 
-	configPath := filepath.Join(home, ".ssh", "config")
-	f, err := os.Open(configPath)
-	if err != nil {
-		return cfg, nil // no config, use defaults
+	// Inline user@ and :port override whatever SSH config resolved
+	if user != "" {
+		cfg.User = user
 	}
-	defer f.Close()
+	if port != "" {
+		cfg.Port = port
+	}
 
-	parseSSHConfig(f, host, &cfg)
 	return cfg, nil
 }
 

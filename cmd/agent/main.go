@@ -31,6 +31,7 @@ func main() {
 		commandTimeoutSec     int
 		longCommandTimeoutSec int
 		remoteHost            string
+		stdioTunnelAddr       string
 	)
 
 	rootCmd := &cobra.Command{
@@ -53,6 +54,11 @@ func main() {
 				return fmt.Errorf("failed to build logger: %w", err)
 			}
 			defer logger.Sync()
+
+			// Stdio tunnel server mode (invoked by the launching host on the remote).
+			if stdioTunnelAddr != "" {
+				return agent.RunStdioTunnelServer(stdioTunnelAddr, os.Stdin, os.Stdout)
+			}
 
 			// Remote execution: copy self to remote host and run there
 			if remoteHost != "" {
@@ -156,6 +162,8 @@ func main() {
 	flags.IntVar(&commandTimeoutSec, "command-timeout", 300, "Default command execution timeout in seconds (env: JAGR_COMMAND_TIMEOUT)")
 	flags.IntVar(&longCommandTimeoutSec, "long-command-timeout", 900, "Long-running command execution timeout in seconds (env: JAGR_LONG_COMMAND_TIMEOUT)")
 	flags.StringVar(&remoteHost, "remote", "", "Copy agent to remote host via SSH and execute there (env: JAGR_REMOTE)")
+	flags.StringVar(&stdioTunnelAddr, "stdio-tunnel", "", "Internal: run as stdio tunnel server listening on addr (e.g. 127.0.0.1:17537)")
+	flags.MarkHidden("stdio-tunnel") //nolint:errcheck
 
 	// Bind env vars
 	rootCmd.PreRun = func(cmd *cobra.Command, args []string) {
