@@ -22,6 +22,7 @@
                         </a>
                         <nav class="flex items-center gap-4">
                             <a href="/" class="text-sm text-gray-400 hover:text-white transition-colors">Overview</a>
+                            <a href="/memos" class="text-sm text-gray-400 hover:text-white transition-colors">Memos</a>
                             <a href="/configuration" class="text-sm text-gray-400 hover:text-white transition-colors">Configuration</a>
                         </nav>
                     </div>
@@ -43,6 +44,8 @@
         <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
             {{if eq .Page "index"}}
                 {{template "index_page" .}}
+            {{else if eq .Page "memos"}}
+                {{template "memos_page" .}}
             {{else if eq .Page "configuration"}}
                 {{template "configuration_page" .}}
             {{else if eq .Page "agent"}}
@@ -81,6 +84,25 @@
 </div>
 {{end}}
 
+{{define "memos_page"}}
+<div class="mb-8">
+    <h1 class="text-2xl font-semibold text-white">Memos</h1>
+    <p class="text-sm text-gray-500 mt-1">All agent memos across all exercises</p>
+</div>
+
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">All Memos</h2>
+    </div>
+    <div id="memos-list"
+         hx-get="/partials/memos"
+         hx-trigger="load, every 15s [isLiveRefreshEnabled()]"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+{{end}}
+
 {{define "agent_page"}}
 <div class="mb-8">
     <nav class="flex items-center gap-1.5 text-sm text-gray-500 mb-3">
@@ -107,6 +129,9 @@
         </button>
         <button class="agent-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="all-reports" onclick="switchAgentTab(this, 'all-reports')">
             All Reports
+        </button>
+        <button class="agent-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="memos" onclick="switchAgentTab(this, 'memos')">
+            Memos
         </button>
     </div>
 </div>
@@ -149,6 +174,21 @@
     </div>
     <div id="agent-reports-list"
          hx-get="/partials/agents/{{.Agent.ID}}/reports"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<!-- Memos Tab -->
+<div id="agent-tab-memos" class="agent-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Memos</h2>
+    </div>
+    <div id="agent-memos-list"
+         hx-get="/partials/agents/{{.Agent.ID}}/memos"
          hx-trigger="load"
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
@@ -211,6 +251,9 @@ function switchAgentTab(btn, tab) {
         </button>
         <button class="session-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="agent-configs" onclick="switchSessionTab(this, 'agent-configs')">
             Agent Settings
+        </button>
+        <button class="session-tab px-4 py-2 text-sm font-medium rounded-md transition-colors text-gray-400 hover:text-white" data-tab="memos" onclick="switchSessionTab(this, 'memos')">
+            Memos
         </button>
     </div>
 </div>
@@ -292,6 +335,21 @@ function switchAgentTab(btn, tab) {
     <div id="agent-configs-content"
          hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/agent-configs"
          hx-trigger="load"
+         hx-swap="innerHTML">
+        <div class="p-12 text-center text-gray-600">Loading...</div>
+    </div>
+</div>
+</div>
+
+<!-- Memos Tab -->
+<div id="tab-memos" class="session-tab-content hidden">
+<div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-base font-semibold text-white">Memos</h2>
+    </div>
+    <div id="session-memos-list"
+         hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/memos"
+         {{if eq .Session.Status "active"}}hx-trigger="load, every 10s [isLiveRefreshEnabled()]"{{else}}hx-trigger="load"{{end}}
          hx-swap="innerHTML">
         <div class="p-12 text-center text-gray-600">Loading...</div>
     </div>

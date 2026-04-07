@@ -481,3 +481,37 @@
 </div>
 {{end}}
 {{end}}
+
+{{define "memos_partial"}}
+{{if .}}
+<div class="divide-y divide-gray-800/50">
+    {{range .}}
+    <div class="px-5 py-4">
+        <div class="flex items-start gap-3">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap mb-2">
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{memoTypeColor .MemoType}}">{{.MemoType}}</span>
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{scopeColor .Scope}}">{{.Scope}}</span>
+                    {{if .Host}}<span class="text-xs font-mono text-gray-500">{{.Host}}</span>{{end}}
+                    {{if .AgentName}}<span class="text-xs text-gray-600">by {{.AgentName}}</span>{{end}}
+                    <span class="ml-auto text-xs text-gray-600">{{timeAgo .CreatedAt}}</span>
+                </div>
+                {{if isLong .Content}}
+                <details>
+                    <summary class="text-sm text-gray-300 cursor-pointer hover:text-white transition-colors whitespace-pre-wrap break-words leading-relaxed">{{previewContent .Content}}</summary>
+                    <div class="mt-2 text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
+                </details>
+                {{else}}
+                <p class="text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">{{.Content}}</p>
+                {{end}}
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="p-12 text-center">
+    <p class="text-gray-600">No memos recorded.</p>
+</div>
+{{end}}
+{{end}}

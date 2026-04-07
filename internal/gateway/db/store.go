@@ -842,6 +842,35 @@ func (s *Store) GetMemos(exerciseID, scope, host, sessionID, since, memoType str
 	return memos, rows.Err()
 }
 
+// GetAllMemos retrieves all memos across all exercises ordered by created_at DESC.
+func (s *Store) GetAllMemos(limit int) ([]models.Memo, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.db.Query(`
+		SELECT id, exercise_id, session_id, host, scope, content, memo_type, agent_name, created_at
+		FROM memos ORDER BY created_at DESC LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memos []models.Memo
+	for rows.Next() {
+		var m models.Memo
+		var agentName sql.NullString
+		if err := rows.Scan(&m.ID, &m.ExerciseID, &m.SessionID, &m.Host, &m.Scope, &m.Content, &m.MemoType, &agentName, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		if agentName.Valid {
+			m.AgentName = agentName.String
+		}
+		memos = append(memos, m)
+	}
+	return memos, rows.Err()
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }

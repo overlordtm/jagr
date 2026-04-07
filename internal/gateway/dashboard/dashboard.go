@@ -217,6 +217,30 @@ func init() {
 			json.Unmarshal([]byte(s), &evidence)
 			return evidence
 		},
+		"memoTypeColor": func(t string) string {
+			switch t {
+			case "finding_lead":
+				return "bg-amber-500/20 text-amber-400"
+			case "correlation":
+				return "bg-sky-500/20 text-sky-400"
+			case "sitrep":
+				return "bg-emerald-500/20 text-emerald-400"
+			case "enrichment":
+				return "bg-purple-500/20 text-purple-400"
+			default: // observation
+				return "bg-gray-500/20 text-gray-400"
+			}
+		},
+		"scopeColor": func(s string) string {
+			switch s {
+			case "host":
+				return "bg-orange-500/20 text-orange-400"
+			case "exercise":
+				return "bg-indigo-500/20 text-indigo-400"
+			default: // agent
+				return "bg-blue-500/20 text-blue-400"
+			}
+		},
 		"add": func(a, b int) int {
 			return a + b
 		},
@@ -322,6 +346,7 @@ func (d *Dashboard) SetupRoutes(router *mux.Router) {
 	// Pages
 	router.Handle("/", wrap(d.indexHandler)).Methods("GET")
 	router.Handle("/configuration", wrap(d.configurationHandler)).Methods("GET")
+	router.Handle("/memos", wrap(d.memosHandler)).Methods("GET")
 	router.Handle("/agents/{agent_id}", wrap(d.agentHandler)).Methods("GET")
 	router.Handle("/agents/{agent_id}/sessions/{session_id}", wrap(d.sessionHandler)).Methods("GET")
 
@@ -335,6 +360,9 @@ func (d *Dashboard) SetupRoutes(router *mux.Router) {
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/agent-configs", wrap(d.sessionAgentConfigsPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/findings", wrap(d.agentFindingsPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/reports", wrap(d.agentReportsPartial)).Methods("GET")
+	router.Handle("/partials/memos", wrap(d.allMemosPartial)).Methods("GET")
+	router.Handle("/partials/agents/{agent_id}/memos", wrap(d.agentMemosPartial)).Methods("GET")
+	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/memos", wrap(d.sessionMemosPartial)).Methods("GET")
 }
 
 func (d *Dashboard) basicAuthMiddleware(next http.Handler) http.Handler {
@@ -672,6 +700,50 @@ func (d *Dashboard) agentReportsPartial(w http.ResponseWriter, r *http.Request) 
 	}
 
 	d.render(w, "agent_reports_partial", reports)
+}
+
+func (d *Dashboard) memosHandler(w http.ResponseWriter, r *http.Request) {
+	d.render(w, "layout", map[string]any{"Page": "memos"})
+}
+
+func (d *Dashboard) allMemosPartial(w http.ResponseWriter, r *http.Request) {
+	memos, err := d.store.GetAllMemos(500)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	d.render(w, "memos_partial", memos)
+}
+
+func (d *Dashboard) agentMemosPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	agentID := vars["agent_id"]
+
+	agent, err := d.store.GetAgent(agentID)
+	if err != nil {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	memos, err := d.store.GetMemos(agentID, "", agent.Hostname, "", "", "", 200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	d.render(w, "memos_partial", memos)
+}
+
+func (d *Dashboard) sessionMemosPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	agentID := vars["agent_id"]
+	sessionID := vars["session_id"]
+
+	memos, err := d.store.GetMemos(agentID, "", "", sessionID, "", "", 200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	d.render(w, "memos_partial", memos)
 }
 
 func (d *Dashboard) render(w http.ResponseWriter, name string, data any) {
