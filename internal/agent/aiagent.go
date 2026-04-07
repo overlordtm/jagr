@@ -253,6 +253,7 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 
 	if choices, ok := reply["choices"].([]any); ok && len(choices) > 0 {
 		choice, _ := choices[0].(map[string]any)
+		finishReason, _ := choice["finish_reason"].(string)
 		if msg, ok := choice["message"].(map[string]any); ok {
 			content, _ := msg["content"].(string)
 
@@ -291,9 +292,17 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 				}
 				return nil, nil
 			}
+
+			if finishReason == "stop" {
+				a.harness.logger.Warn("LLM stopped with no content or tool calls, concluding agent", zap.String("name", a.name))
+				a.concluded = true
+				return nil, nil
+			}
 		}
 	}
 
+	replyJSON, _ := json.Marshal(reply)
+	a.harness.logger.Error("No tool calls in response", zap.String("name", a.name), zap.String("reply", string(replyJSON)))
 	return nil, fmt.Errorf("no tool calls in response")
 }
 
