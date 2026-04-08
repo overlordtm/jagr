@@ -108,6 +108,10 @@ type ModelMapping struct {
 	Upstream         string         `yaml:"upstream"`
 	MaxContextWindow int            `yaml:"max_context_window,omitempty"`
 	ExtraBody        map[string]any `yaml:"extra_body,omitempty"`
+	// MaxMessages limits how many messages are sent per request (0 = unlimited).
+	// Useful for models that return empty choices on long tool-use conversations.
+	// When the conversation exceeds this, the oldest non-system messages are dropped.
+	MaxMessages      int            `yaml:"max_messages,omitempty"`
 }
 
 type LoggingConfig struct {

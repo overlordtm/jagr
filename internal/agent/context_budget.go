@@ -6,48 +6,24 @@ import (
 	"time"
 )
 
-// Tool output truncation limits (lines).
-var toolMaxLines = map[string]int{
-	"run_linpeas_sh":     150,
-	"run_linpeas_static": 150,
-	"run_pspy":           100,
-	"read_file":          100,
-	"check_cron":         200,
-	"check_users":        200,
-	"check_systemd":      200,
-	"check_suid":         200,
-	"check_modules":      200,
-	"check_listeners":    200,
-}
-
-const defaultToolMaxLines = 200
-
-// TruncateToolOutput truncates tool output to a per-tool line limit,
-// keeping head and tail lines for context.
-func TruncateToolOutput(toolName string, output string) string {
-	maxLines := defaultToolMaxLines
-	if ml, ok := toolMaxLines[toolName]; ok {
-		maxLines = ml
-	}
-
+// TruncateToolOutput truncates tool output to 40 lines (20 head, 20 tail)
+// keeping head and tail lines for context and prompting how to paginate the rest.
+func TruncateToolOutput(toolName string, toolCallID string, output string) string {
 	lines := strings.Split(output, "\n")
-	if len(lines) <= maxLines {
+	if len(lines) <= 40 {
 		return output
 	}
 
-	headCount := maxLines - 10
-	if headCount < 10 {
-		headCount = 10
-	}
-	tailCount := 10
+	headCount := 20
+	tailCount := 20
 
 	var b strings.Builder
 	for i := 0; i < headCount && i < len(lines); i++ {
 		b.WriteString(lines[i])
 		b.WriteString("\n")
 	}
-	b.WriteString(fmt.Sprintf("\n--- TRUNCATED: showing %d of %d lines. Last %d lines below. Use execute_trusted with head/tail/grep to see specific ranges. ---\n\n",
-		maxLines, len(lines), tailCount))
+	b.WriteString(fmt.Sprintf("\n--- TRUNCATED: showing %d of %d lines. The complete result is cached. To read more lines, call 'read_cached_output' tool with tool_call_id='%s' and appropriate start_line and max_lines. ---\n\n",
+		headCount+tailCount, len(lines), toolCallID))
 
 	start := len(lines) - tailCount
 	if start < 0 {

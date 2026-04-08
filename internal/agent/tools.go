@@ -344,6 +344,29 @@ func GetAvailableTools() []Tool {
 				"required": []string{"target", "context"},
 			},
 		},
+		{
+			Name:        "read_cached_output",
+			Description: "Read specific lines from a previously executed tool's truncated output cache.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tool_call_id": map[string]any{
+						"type":        "string",
+						"description": "The ID of the tool call that resulted in truncated output.",
+					},
+					"start_line": map[string]any{
+						"type":        "integer",
+						"description": "0-indexed starting line.",
+					},
+					"max_lines": map[string]any{
+						"type":        "integer",
+						"description": "Maximum lines to read.",
+						"default":     100,
+					},
+				},
+				"required": []string{"tool_call_id", "start_line"},
+			},
+		},
 	}
 }
 
@@ -359,7 +382,7 @@ func GetToolsForRole(role string) []Tool {
 		return filterTools(allTools, []string{
 			"execute_trusted", "read_file", "list_dir",
 			"get_system_env", "get_network_info", "check_listeners",
-			"check_systemd", "write_memo", "conclude",
+			"check_systemd", "write_memo", "conclude", "read_cached_output",
 		})
 	case "investigator":
 		// Investigator does the deep dive, needs full access but not delegation
@@ -369,6 +392,7 @@ func GetToolsForRole(role string) []Tool {
 			"search_files", "get_network_info", "submit_finding", "conclude",
 			"write_memo", "read_memos", "query_knowledge_base",
 			"check_cron", "check_users", "check_systemd", "check_suid", "check_modules", "check_listeners",
+			"read_cached_output",
 		})
 	default:
 		// Phase Agents do broad searches, can delegate investigations
@@ -378,6 +402,7 @@ func GetToolsForRole(role string) []Tool {
 			"search_files", "get_network_info", "delegate_investigation", "conclude",
 			"write_memo", "read_memos", "query_knowledge_base",
 			"check_cron", "check_users", "check_systemd", "check_suid", "check_modules", "check_listeners",
+			"read_cached_output",
 		})
 	}
 }

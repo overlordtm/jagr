@@ -29,6 +29,8 @@ type AiAgent struct {
 	findingsStore    *FindingsStore
 	investigatorWg   sync.WaitGroup
 	delegatedTargets map[string]bool
+	paramsCache      map[string]ToolResult
+	idCache          map[string]ToolResult
 }
 
 // NewAiAgent creates a new AiAgent. For phase agents, name should equal role.
@@ -57,6 +59,8 @@ func NewAiAgent(harness *JagrHarness, name, role, systemPrompt, objective string
 		findingsStore:    harness.findingsStore,
 		llmContext:       ctx,
 		delegatedTargets: make(map[string]bool),
+		paramsCache:      make(map[string]ToolResult),
+		idCache:          make(map[string]ToolResult),
 	}
 }
 
@@ -83,6 +87,14 @@ func (a *AiAgent) Run() error {
 		}
 	}
 	for a.iterations < iterLimit {
+		// Run batch context compression every 5 iterations if history is large
+		if a.iterations > 0 && a.iterations%5 == 0 && len(a.llmContext.RawHistory()) > 20 {
+			a.harness.logger.Info("Compacting agent context", zap.String("name", a.name))
+			if err := a.llmContext.Compact(); err != nil {
+				a.harness.logger.Warn("Context compaction failed", zap.Error(err))
+			}
+		}
+
 		a.harness.logger.Info("AiAgent Thinking", zap.String("name", a.name), zap.Int("iteration", a.iterations+1))
 
 		toolCalls, err := a.think()
@@ -440,9 +452,77 @@ func (a *AiAgent) executeTool(tc ToolCall) (ToolResult, error) {
 	case "read_memos":
 		return a.executeReadMemos(tc)
 
+	case "read_cached_output":
+		return a.executeReadCachedOutput(tc)
+
 	default:
-		return a.toolbox.ExecuteTool(tc)
+		// Check param cache first for toolbox executed tools
+		cacheKey := tc.Function.Name + "|" + tc.Function.Arguments
+		if cachedResult, hit := a.paramsCache[cacheKey]; hit {
+			// Found in cache, just update the ToolID to the current tool call and return immediately
+			cachedResult.ToolID = tc.ID
+			a.idCache[tc.ID] = cachedResult
+			return cachedResult, nil
+		}
+
+		res, err := a.toolbox.ExecuteTool(tc)
+		if err == nil && !res.IsError {
+			a.paramsCache[cacheKey] = res
+			a.idCache[tc.ID] = res
+		}
+		return res, err
 	}
+}
+
+func (a *AiAgent) executeReadCachedOutput(tc ToolCall) (ToolResult, error) {
+	args, err := ParseToolArguments(tc.Function.Arguments)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("failed to parse args: %w", err)
+	}
+
+	toolCallID, _ := args["tool_call_id"].(string)
+	startLine := 0
+	if sl, ok := args["start_line"].(float64); ok {
+		startLine = int(sl)
+	}
+	maxLines := 100
+	if ml, ok := args["max_lines"].(float64); ok {
+		maxLines = int(ml)
+	}
+
+	cached, found := a.idCache[toolCallID]
+	if !found {
+		return ToolResult{
+			ToolID:  tc.ID,
+			Name:    tc.Function.Name,
+			Content: fmt.Sprintf("Error: tool result for id %s not found in cache", toolCallID),
+			IsError: true,
+		}, nil
+	}
+
+	lines := strings.Split(cached.Content, "\n")
+	if startLine < 0 || startLine >= len(lines) {
+		return ToolResult{
+			ToolID:  tc.ID,
+			Name:    tc.Function.Name,
+			Content: fmt.Sprintf("Error: start_line %d out of bounds (total lines: %d)", startLine, len(lines)),
+			IsError: true,
+		}, nil
+	}
+
+	endLine := startLine + maxLines
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+
+	snippet := strings.Join(lines[startLine:endLine], "\n")
+	content := fmt.Sprintf("--- Cached Output (Lines %d to %d of %d) ---\n%s", startLine, endLine-1, len(lines), snippet)
+	
+	return ToolResult{
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
+		Content: content,
+	}, nil
 }
 
 func (a *AiAgent) executeQueryKnowledgeBase(tc ToolCall) (ToolResult, error) {
@@ -520,7 +600,10 @@ func (a *AiAgent) executeReadMemos(tc ToolCall) (ToolResult, error) {
 func (a *AiAgent) observe(results []ToolResult) error {
 	for _, result := range results {
 		// Apply truncation and wrapping to tool output
-		content := TruncateToolOutput(result.Name, result.Content)
+		content := result.Content
+		if result.Name != "read_cached_output" {
+			content = TruncateToolOutput(result.Name, result.ToolID, result.Content)
+		}
 		content = WrapToolResult(result.Name, content, result.Duration)
 
 		a.llmContext.Append(Message{

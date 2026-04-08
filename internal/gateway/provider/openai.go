@@ -56,11 +56,13 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 	modelAlias := req.Model
 	var upstreamModel string
 	var extraBody map[string]any
+	var maxMessages int
 
 	for _, m := range p.config.Models {
 		if m.Alias == modelAlias {
 			upstreamModel = m.Upstream
 			extraBody = m.ExtraBody
+			maxMessages = m.MaxMessages
 			break
 		}
 	}
@@ -68,11 +70,20 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 	if upstreamModel == "" && len(p.config.Models) > 0 {
 		upstreamModel = p.config.Models[0].Upstream
 		extraBody = p.config.Models[0].ExtraBody
+		maxMessages = p.config.Models[0].MaxMessages
 	} else if upstreamModel == "" {
 		upstreamModel = modelAlias
 	}
 
 	req.Model = upstreamModel
+
+	if maxMessages > 0 && len(req.Messages) > maxMessages {
+		req.Messages = trimMessages(req.Messages, maxMessages)
+		p.log.Debug("Trimmed messages for model",
+			zap.String("model", modelAlias),
+			zap.Int("max_messages", maxMessages),
+			zap.Int("trimmed_to", len(req.Messages)))
+	}
 
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
@@ -165,8 +176,8 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		if reply.Error != nil {
 			p.log.Warn("Provider returned embedded error in 200 response",
 				zap.String("message", reply.Error.Message),
-				zap.String("code", reply.Error.Code))
-			lastErr = fmt.Errorf("provider error: %s (code: %s)", reply.Error.Message, reply.Error.Code)
+				zap.Any("code", reply.Error.Code))
+			lastErr = fmt.Errorf("provider error: %s (code: %v)", reply.Error.Message, reply.Error.Code)
 			continue
 		}
 
@@ -192,4 +203,36 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 	}
 
 	return nil, lastErr
+}
+
+// trimMessages keeps all leading system messages and the most recent non-system
+// messages up to maxMessages total, snapping to a clean cut point so we never
+// start mid-tool-sequence (i.e. never start on a "tool" role message).
+func trimMessages(messages []models.Message, maxMessages int) []models.Message {
+	// Collect leading system messages
+	sysEnd := 0
+	for sysEnd < len(messages) && messages[sysEnd].Role == "system" {
+		sysEnd++
+	}
+	systemMsgs := messages[:sysEnd]
+	rest := messages[sysEnd:]
+
+	slots := maxMessages - len(systemMsgs)
+	if slots <= 0 || len(rest) <= slots {
+		return messages
+	}
+
+	// Cut from the oldest non-system messages
+	cutFrom := len(rest) - slots
+
+	// Snap forward past any orphaned tool-result messages so we never
+	// start the trimmed window with a dangling tool response.
+	for cutFrom < len(rest) && rest[cutFrom].Role == "tool" {
+		cutFrom++
+	}
+
+	result := make([]models.Message, 0, len(systemMsgs)+len(rest)-cutFrom)
+	result = append(result, systemMsgs...)
+	result = append(result, rest[cutFrom:]...)
+	return result
 }
