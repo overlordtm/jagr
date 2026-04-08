@@ -405,6 +405,20 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		g.mu.Unlock()
 	}
 
+	if len(resp.Choices) == 0 {
+		g.log.Error("Provider returned empty choices", zap.String("model", resp.Model))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorInfo{
+				Message: "provider returned a response with no choices",
+				Type:    "provider_error",
+				Code:    "empty_choices",
+			},
+		})
+		return
+	}
+
 	g.store.AppendMessage(sessionID, &models.Message{
 		Role:             "assistant",
 		Content:          resp.Choices[0].Message.Content,

@@ -1,7 +1,8 @@
-.PHONY: all build build-agent build-gateway build-dashboard build-prod build-agent-prod build-gateway-prod compress-tools test clean tools fetch-tools patch-busybox build-busybox
+.PHONY: all build build-agent build-gateway build-eval build-dashboard build-prod build-agent-prod build-gateway-prod compress-tools test clean tools fetch-tools patch-busybox build-busybox
 
 AGENT_BIN   := dist/jagr-agent
 GATEWAY_BIN := dist/jagr-gateway
+EVAL_BIN    := dist/jagr-eval
 TOOLS_DIR   := internal/agent/tools
 
 # Tool versions (override via environment or make args)
@@ -18,11 +19,15 @@ all: fetch-tools build
 
 # --- Build ---
 
-build: build-agent build-gateway
+build: build-agent build-gateway build-eval
 
 build-agent:
 	@mkdir -p dist
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(AGENT_BIN)-$(GOOS)-$(GOARCH) ./cmd/agent
+
+build-eval:
+	@mkdir -p dist
+	CGO_ENABLED=1 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(EVAL_BIN)-$(GOOS)-$(GOARCH) ./cmd/eval
 
 build-dashboard:
 	cd web && npm install && npx vite build

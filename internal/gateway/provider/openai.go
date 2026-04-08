@@ -100,7 +100,9 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		zap.String("base_url", p.baseURL))
 
 	const maxRetries = 3
+	const maxEmptyChoicesRetries = 1 // empty choices are rarely transient; fail fast
 	var lastErr error
+	var emptyChoicesAttempts int
 	client := &http.Client{Timeout: p.requestTimeout}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -157,6 +159,29 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 		var reply models.ChatCompletionResponse
 		if err := json.Unmarshal(body, &reply); err != nil {
 			return nil, err
+		}
+
+		// OpenRouter sometimes returns HTTP 200 with an embedded error object
+		if reply.Error != nil {
+			p.log.Warn("Provider returned embedded error in 200 response",
+				zap.String("message", reply.Error.Message),
+				zap.String("code", reply.Error.Code))
+			lastErr = fmt.Errorf("provider error: %s (code: %s)", reply.Error.Message, reply.Error.Code)
+			continue
+		}
+
+		// Empty choices with no error field — log body for diagnosis.
+		// Only retry once since empty choices are rarely transient.
+		if len(reply.Choices) == 0 {
+			p.log.Warn("Provider returned empty choices",
+				zap.String("model", reply.Model),
+				zap.String("body", string(body)))
+			lastErr = fmt.Errorf("provider returned empty choices for model %q", reply.Model)
+			emptyChoicesAttempts++
+			if emptyChoicesAttempts > maxEmptyChoicesRetries {
+				return nil, lastErr
+			}
+			continue
 		}
 
 		p.log.Debug("Got response from provider",

@@ -62,6 +62,8 @@ go.work
 
 # testing config
 gateway.yaml 
+eval.yaml
+testdata/ground-truth.vuln-box.yaml
 
 # built binaries
 dist/
@@ -93,3 +95,4 @@ ssh_config
 .direnv/
 
 jagr.db*
+jagr_eval.db*

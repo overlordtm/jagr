@@ -1,0 +1,38 @@
+# Jagr Eval Harness — example configuration
+# Run with: jagr-eval run --eval=eval.example.yaml --gateway-config=gateway.yaml --db=jagr.db
+
+name: "model-comparison"
+description: "Compare fast (Haiku) vs default (Sonnet) models for finding quality"
+ground_truth: "testdata/ground-truth.example.yaml"
+repeat: 2  # Run each variant twice and average the scores
+
+variants:
+  - id: "fast-low-temp"
+    description: "Haiku 4.5 with low temperature across all phases"
+    agents:
+      phase_UserAccess:   { model: fast, temperature: 0.05 }
+      phase_Persistence:  { model: fast, temperature: 0.05 }
+      phase_Network:      { model: fast, temperature: 0.05 }
+      phase_Filesystem:   { model: fast, temperature: 0.05 }
+      phase_LogAnalysis:  { model: fast, temperature: 0.05 }
+      reporter:           { model: fast, temperature: 0.3 }
+
+  - id: "sonnet-default"
+    description: "Claude Sonnet 4.6 with standard temperatures"
+    agents:
+      phase_UserAccess:   { model: default, temperature: 0.1 }
+      phase_Persistence:  { model: default, temperature: 0.1 }
+      phase_Network:      { model: default, temperature: 0.1 }
+      phase_Filesystem:   { model: default, temperature: 0.1 }
+      phase_LogAnalysis:  { model: default, temperature: 0.1 }
+      reporter:           { model: default, temperature: 0.2 }
+
+  - id: "mixed-fast-reporter"
+    description: "Fast phases + Sonnet for reporting"
+    agents:
+      phase_UserAccess:   { model: fast, temperature: 0.05 }
+      phase_Persistence:  { model: fast, temperature: 0.05 }
+      phase_Network:      { model: fast, temperature: 0.05 }
+      phase_Filesystem:   { model: fast, temperature: 0.05 }
+      phase_LogAnalysis:  { model: fast, temperature: 0.05 }
+      reporter:           { model: default, temperature: 0.2 }

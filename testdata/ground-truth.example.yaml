@@ -1,0 +1,42 @@
+# Ground truth for a known-compromised Linux target.
+# Add one entry per expected finding observable.
+# required: true marks findings that must be caught for the audit to be useful.
+
+target: "example-target-host"
+
+findings:
+  - type: persistence
+    severity: critical
+    observable: "/etc/cron.d/svc-cleanup"
+    required: true
+    notes: "Cron-based backdoor added by attacker"
+
+  - type: privilege_escalation
+    severity: critical
+    observable: "/usr/local/bin/suid-wrapper"
+    required: true
+    notes: "Custom SUID binary dropped by attacker"
+
+  - type: user_account
+    severity: high
+    observable: "svc_backup"
+    required: true
+    notes: "Attacker-created service account with sudo access"
+
+  - type: persistence
+    severity: high
+    observable: "/etc/systemd/system/update-helper.service"
+    required: false
+    notes: "Malicious systemd unit"
+
+  - type: network
+    severity: medium
+    observable: "0.0.0.0:4444"
+    required: false
+    notes: "Reverse shell listener on non-standard port"
+
+  - type: filesystem
+    severity: low
+    observable: "/tmp/.hidden_tool"
+    required: false
+    notes: "Attacker toolkit staged in /tmp"

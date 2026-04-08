@@ -63,12 +63,13 @@ type Usage struct {
 }
 
 type ChatCompletionResponse struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   *Usage   `json:"usage,omitempty"`
+	ID      string    `json:"id"`
+	Object  string    `json:"object"`
+	Created int64     `json:"created"`
+	Model   string    `json:"model"`
+	Choices []Choice  `json:"choices"`
+	Usage   *Usage    `json:"usage,omitempty"`
+	Error   *ErrorInfo `json:"error,omitempty"` // OpenRouter may embed errors in 200 responses
 }
 
 type ErrorResponse struct {
