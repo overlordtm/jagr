@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -107,6 +109,15 @@ func main() {
 				return fmt.Errorf("failed to create clean room: %w", err)
 			}
 			defer cleanRoom.Cleanup()
+
+			// Ensure cleanup runs on SIGTERM/SIGINT (defer alone won't fire on signals)
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+			go func() {
+				<-sigCh
+				cleanRoom.Cleanup()
+				os.Exit(1)
+			}()
 
 			// Apply configurable timeouts to clean room
 			if commandTimeoutSec > 0 {

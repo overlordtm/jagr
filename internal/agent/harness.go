@@ -141,6 +141,18 @@ func (h *JagrHarness) Run() error {
 		h.logger.Error("Reporter agent failed", zap.Error(err))
 	}
 
+	// If the reporter responded with text instead of calling write_file, save it anyway.
+	if _, err := os.Stat(reportPath); os.IsNotExist(err) {
+		if text := reporterAgent.LastTextResponse(); text != "" {
+			h.logger.Warn("Reporter did not call write_file — saving last text response as report")
+			if writeErr := os.WriteFile(reportPath, []byte(text), 0644); writeErr != nil {
+				h.logger.Error("Failed to write fallback report", zap.Error(writeErr))
+			}
+		} else {
+			h.logger.Error("Reporter produced no output and no report file was written")
+		}
+	}
+
 	h.generateReports("Multi-agent architecture concluded")
 
 	// Validate findings and update statuses at gateway

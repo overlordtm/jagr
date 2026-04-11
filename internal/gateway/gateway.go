@@ -405,16 +405,20 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		g.mu.Unlock()
 	}
 
-	g.store.AppendMessage(sessionID, &models.Message{
-		Role:             "assistant",
-		Content:          resp.Choices[0].Message.Content,
-		ReasoningContent: resp.Choices[0].Message.ReasoningContent,
-		ToolCalls:        resp.Choices[0].Message.ToolCalls,
-		AgentRole:        agentRole,
-		AgentName:        agentName,
-	}, resp.Model, tokensIn, tokensOut, tokensThinking, costUSD, int(latency))
+	if len(resp.Choices) > 0 {
+		g.store.AppendMessage(sessionID, &models.Message{
+			Role:             "assistant",
+			Content:          resp.Choices[0].Message.Content,
+			ReasoningContent: resp.Choices[0].Message.ReasoningContent,
+			ToolCalls:        resp.Choices[0].Message.ToolCalls,
+			AgentRole:        agentRole,
+			AgentName:        agentName,
+		}, resp.Model, tokensIn, tokensOut, tokensThinking, costUSD, int(latency))
+	}
 
-	g.store.UpdateAgentConfigUpstream(sessionID, agentRole, req.Model, resp.Model, g.config.Providers[0].Name)
+	if len(g.config.Providers) > 0 {
+		g.store.UpdateAgentConfigUpstream(sessionID, agentRole, req.Model, resp.Model, g.config.Providers[0].Name)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

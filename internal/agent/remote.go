@@ -109,6 +109,11 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 
 	execErr := execRemote(client, remoteCmd, logger)
 
+	// Clean up remote binary regardless of execution outcome
+	if cleanupErr := runRemoteCommand(client, fmt.Sprintf("rm -f %s", remotePath)); cleanupErr != nil {
+		logger.Warn("Failed to remove remote binary", zap.String("path", remotePath), zap.Error(cleanupErr))
+	}
+
 	// Collect artifacts from remote host regardless of execution outcome
 	if localOutputDir != "" {
 		logger.Info("Collecting artifacts from remote host",
@@ -319,15 +324,21 @@ func forwardConnection(remoteConn net.Conn, localTarget string, logger *zap.Logg
 }
 
 // rewriteArg replaces the value of a --flag=value style argument in args.
+// If the flag is not present, it is appended.
 func rewriteArg(args []string, flag, newValue string) []string {
 	prefix := flag + "="
 	result := make([]string, len(args))
+	found := false
 	for i, arg := range args {
 		if strings.HasPrefix(arg, prefix) {
 			result[i] = prefix + newValue
+			found = true
 		} else {
 			result[i] = arg
 		}
+	}
+	if !found {
+		result = append(result, prefix+newValue)
 	}
 	return result
 }
@@ -442,6 +453,16 @@ func scpCopy(client *ssh.Client, localPath string) (string, error) {
 		return "", fmt.Errorf("remote copy: %w; stderr: %s", err, stderrBuf.String())
 	}
 	return remotePath, nil
+}
+
+// runRemoteCommand runs a command on the remote host, discarding its output.
+func runRemoteCommand(client *ssh.Client, cmd string) error {
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	defer session.Close()
+	return session.Run(cmd)
 }
 
 // execRemote runs a command on the remote host, streaming stdout/stderr to our own stdout/stderr.
