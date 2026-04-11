@@ -33,6 +33,23 @@ session:
 agent_api_key: ${JAGR_AGENT_API_KEY}
 
 providers:
+  # Native Anthropic API (direct integration, no OpenRouter)
+  # - name: anthropic
+  #   type: anthropic
+  #   base_url: https://api.anthropic.com/v1  # optional, this is the default
+  #   api_key: ${ANTHROPIC_API_KEY}
+  #   models:
+  #     - alias: "default"
+  #       upstream: "claude-sonnet-4-20250514"
+  #       max_context_window: 200000
+  #     - alias: "fast"
+  #       upstream: "claude-haiku-4-20250514"
+  #       max_context_window: 200000
+  #     - alias: "opus"
+  #       upstream: "claude-opus-4-20250514"
+  #       max_context_window: 200000
+
+  # OpenRouter (supports multiple providers including Anthropic)
   - name: openrouter
     type: openai_compatible
     base_url: https://openrouter.ai/api/v1
@@ -48,6 +65,7 @@ providers:
         upstream: "google/gemini-flash-1.5"
         max_context_window: 1000000
 
+  # Local Ollama instance
   - name: local-ollama
     type: openai_compatible
     base_url: http://localhost:11434/v1

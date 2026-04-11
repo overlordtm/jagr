@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -108,6 +110,15 @@ func main() {
 			}
 			defer cleanRoom.Cleanup()
 
+			// Ensure cleanup runs on SIGTERM/SIGINT (defer alone won't fire on signals)
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+			go func() {
+				<-sigCh
+				cleanRoom.Cleanup()
+				os.Exit(1)
+			}()
+
 			// Apply configurable timeouts to clean room
 			if commandTimeoutSec > 0 {
 				cleanRoom.DefaultTimeout = time.Duration(commandTimeoutSec) * time.Second
@@ -205,6 +216,7 @@ func bindStringEnv(cmd *cobra.Command, flagName, envName string, target *string)
 	if !cmd.Flags().Changed(flagName) {
 		if v := os.Getenv(envName); v != "" {
 			*target = v
+			cmd.Flags().Set(flagName, v) //nolint:errcheck
 		}
 	}
 }
@@ -215,6 +227,7 @@ func bindIntEnv(cmd *cobra.Command, flagName, envName string, target *int) {
 			var n int
 			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
 				*target = n
+				cmd.Flags().Set(flagName, v) //nolint:errcheck
 			} else {
 				fmt.Fprintf(os.Stderr, "warning: invalid %s=%q, using default\n", envName, v)
 			}
@@ -226,6 +239,7 @@ func bindBoolEnv(cmd *cobra.Command, flagName, envName string, target *bool) {
 	if !cmd.Flags().Changed(flagName) {
 		if v := os.Getenv(envName); v != "" {
 			*target = (v == "true" || v == "1" || v == "yes")
+			cmd.Flags().Set(flagName, v) //nolint:errcheck
 		}
 	}
 }

@@ -68,15 +68,13 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 		return fmt.Errorf("eval symlinks: %w", err)
 	}
 
-	remotePath := "/tmp/jagr-agent"
+	logger.Info("Copying binary to remote host", zap.String("local", selfPath))
 
-	logger.Info("Copying binary to remote host",
-		zap.String("local", selfPath),
-		zap.String("remote", remotePath))
-
-	if err := scpCopy(client, selfPath, remotePath); err != nil {
+	remotePath, err := scpCopy(client, selfPath)
+	if err != nil {
 		return fmt.Errorf("scp copy: %w", err)
 	}
+	logger.Info("Binary copied to remote host", zap.String("remote", remotePath))
 
 	// Set up a tunnel so the remote agent can reach the gateway.
 	if gatewayURL != "" {
@@ -110,6 +108,11 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 	logger.Info("Executing on remote host", zap.String("command", remoteCmd))
 
 	execErr := execRemote(client, remoteCmd, logger)
+
+	// Clean up remote binary regardless of execution outcome
+	if cleanupErr := runRemoteCommand(client, fmt.Sprintf("rm -f %s", remotePath)); cleanupErr != nil {
+		logger.Warn("Failed to remove remote binary", zap.String("path", remotePath), zap.Error(cleanupErr))
+	}
 
 	// Collect artifacts from remote host regardless of execution outcome
 	if localOutputDir != "" {
@@ -321,15 +324,21 @@ func forwardConnection(remoteConn net.Conn, localTarget string, logger *zap.Logg
 }
 
 // rewriteArg replaces the value of a --flag=value style argument in args.
+// If the flag is not present, it is appended.
 func rewriteArg(args []string, flag, newValue string) []string {
 	prefix := flag + "="
 	result := make([]string, len(args))
+	found := false
 	for i, arg := range args {
 		if strings.HasPrefix(arg, prefix) {
 			result[i] = prefix + newValue
+			found = true
 		} else {
 			result[i] = arg
 		}
+	}
+	if !found {
+		result = append(result, prefix+newValue)
 	}
 	return result
 }
@@ -394,24 +403,37 @@ func execLocalCommand(cmd string, r io.Reader) error {
 }
 
 // scpCopy copies a local file to the remote host by streaming it through an SSH session.
-// It uses cat + chmod instead of the legacy SCP protocol, which is no longer available
+// It first runs mktemp on the remote to obtain a unique path, then streams the file there.
+// Returns the remote path chosen by mktemp.
+// Uses cat + chmod instead of the legacy SCP protocol, which is no longer available
 // on newer OpenSSH servers (9.0+).
-func scpCopy(client *ssh.Client, localPath, remotePath string) error {
+func scpCopy(client *ssh.Client, localPath string) (string, error) {
+	mktempSession, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("new session for mktemp: %w", err)
+	}
+	out, err := mktempSession.Output("mktemp /tmp/jagr-XXXXXX")
+	mktempSession.Close()
+	if err != nil {
+		return "", fmt.Errorf("mktemp on remote: %w", err)
+	}
+	remotePath := strings.TrimSpace(string(out))
+
 	f, err := os.Open(localPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer session.Close()
 
 	w, err := session.StdinPipe()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var stderrBuf strings.Builder
@@ -419,18 +441,28 @@ func scpCopy(client *ssh.Client, localPath, remotePath string) error {
 
 	cmd := fmt.Sprintf("cat > %s && chmod 755 %s", remotePath, remotePath)
 	if err := session.Start(cmd); err != nil {
-		return fmt.Errorf("start remote copy: %w", err)
+		return "", fmt.Errorf("start remote copy: %w", err)
 	}
 
 	if _, err := io.Copy(w, f); err != nil {
-		return fmt.Errorf("copy file data: %w", err)
+		return "", fmt.Errorf("copy file data: %w", err)
 	}
 	w.Close()
 
 	if err := session.Wait(); err != nil {
-		return fmt.Errorf("remote copy: %w; stderr: %s", err, stderrBuf.String())
+		return "", fmt.Errorf("remote copy: %w; stderr: %s", err, stderrBuf.String())
 	}
-	return nil
+	return remotePath, nil
+}
+
+// runRemoteCommand runs a command on the remote host, discarding its output.
+func runRemoteCommand(client *ssh.Client, cmd string) error {
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	defer session.Close()
+	return session.Run(cmd)
 }
 
 // execRemote runs a command on the remote host, streaming stdout/stderr to our own stdout/stderr.

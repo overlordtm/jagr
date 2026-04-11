@@ -23,6 +23,7 @@ type AiAgent struct {
 	iterations       int
 	maxIter          int // 0 means resolve from profile/harness defaults
 	concluded        bool
+	gemmaToolFormat  bool // true when the model uses Gemma 4 native tool call tokens
 	tools            []Tool
 	toolbox          *ToolBox
 	gateway          *GatewayClient
@@ -58,6 +59,19 @@ func NewAiAgent(harness *JagrHarness, name, role, systemPrompt, objective string
 		llmContext:       ctx,
 		delegatedTargets: make(map[string]bool),
 	}
+}
+
+// LastTextResponse returns the last non-empty assistant text message from the conversation,
+// or empty string if none exists. Useful as a fallback when the agent concludes without
+// calling a tool (e.g. reporter writes the report as a text response instead of write_file).
+func (a *AiAgent) LastTextResponse() string {
+	history := a.llmContext.RawHistory()
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && history[i].Content != "" {
+			return history[i].Content
+		}
+	}
+	return ""
 }
 
 // Run executes the agent's think→act→observe loop until concluded or max iterations reached.
@@ -277,6 +291,22 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 					ToolCalls: parsedCalls,
 				})
 				return parsedCalls, nil
+			}
+
+			// Fallback: Gemma 4 embeds tool calls in content using its own token format
+			// rather than the OpenAI tool_calls field.
+			if content != "" && strings.Contains(content, gemmaToolCallOpen) {
+				if parsedCalls := parseGemmaToolCalls(content); len(parsedCalls) > 0 {
+					a.harness.logger.Info("Parsed Gemma-native tool calls from content",
+						zap.String("name", a.name), zap.Int("count", len(parsedCalls)))
+					a.gemmaToolFormat = true
+					a.llmContext.Append(Message{
+						Role:      "assistant",
+						Content:   content,
+						ToolCalls: parsedCalls,
+					})
+					return parsedCalls, nil
+				}
 			}
 
 			a.llmContext.Append(Message{
@@ -518,18 +548,34 @@ func (a *AiAgent) executeReadMemos(tc ToolCall) (ToolResult, error) {
 }
 
 func (a *AiAgent) observe(results []ToolResult) error {
-	for _, result := range results {
-		// Apply truncation and wrapping to tool output
-		content := TruncateToolOutput(result.Name, result.Content)
-		content = WrapToolResult(result.Name, content, result.Duration)
-
+	if a.gemmaToolFormat {
+		// Gemma 4 does not understand role:tool messages. Combine all results into
+		// a single role:user message using Gemma's native <|tool_response> tokens.
+		var combined strings.Builder
+		for _, result := range results {
+			content := TruncateToolOutput(result.Name, result.Content)
+			content = WrapToolResult(result.Name, content, result.Duration)
+			combined.WriteString(formatGemmaToolResponse(result.Name, content))
+			combined.WriteByte('\n')
+		}
 		a.llmContext.Append(Message{
-			Role:       "tool",
-			Content:    content,
-			Name:       result.Name,
-			ToolCallID: result.ToolID,
+			Role:    "user",
+			Content: combined.String(),
 		})
+	} else {
+		for _, result := range results {
+			content := TruncateToolOutput(result.Name, result.Content)
+			content = WrapToolResult(result.Name, content, result.Duration)
+			a.llmContext.Append(Message{
+				Role:       "tool",
+				Content:    content,
+				Name:       result.Name,
+				ToolCallID: result.ToolID,
+			})
+		}
+	}
 
+	for _, result := range results {
 		if err := a.harness.logEvent("tool_result", map[string]any{
 			"name":      a.name,
 			"role":      a.role,
@@ -539,7 +585,6 @@ func (a *AiAgent) observe(results []ToolResult) error {
 		}); err != nil {
 			a.harness.logger.Error("Failed to log tool result", zap.Error(err))
 		}
-
 		if result.IsError {
 			a.harness.logger.Error("Tool execution error", zap.String("name", a.name), zap.String("tool", result.Name))
 		}
