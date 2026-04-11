@@ -205,6 +205,7 @@ func bindStringEnv(cmd *cobra.Command, flagName, envName string, target *string)
 	if !cmd.Flags().Changed(flagName) {
 		if v := os.Getenv(envName); v != "" {
 			*target = v
+			cmd.Flags().Set(flagName, v) //nolint:errcheck
 		}
 	}
 }
@@ -215,6 +216,7 @@ func bindIntEnv(cmd *cobra.Command, flagName, envName string, target *int) {
 			var n int
 			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
 				*target = n
+				cmd.Flags().Set(flagName, v) //nolint:errcheck
 			} else {
 				fmt.Fprintf(os.Stderr, "warning: invalid %s=%q, using default\n", envName, v)
 			}
@@ -226,6 +228,7 @@ func bindBoolEnv(cmd *cobra.Command, flagName, envName string, target *bool) {
 	if !cmd.Flags().Changed(flagName) {
 		if v := os.Getenv(envName); v != "" {
 			*target = (v == "true" || v == "1" || v == "yes")
+			cmd.Flags().Set(flagName, v) //nolint:errcheck
 		}
 	}
 }

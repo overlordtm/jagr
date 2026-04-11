@@ -120,3 +120,4 @@ test:
 
 clean:
 	rm -rf dist/
+	rm -f external/busybox/.config

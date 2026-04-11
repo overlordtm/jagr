@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	
+
 	"github.com/overlordtm/jagr/internal/gateway/models"
 )
 
@@ -20,22 +21,21 @@ type Provider interface {
 }
 
 type OpenAICompatibleProvider struct {
-	config          *models.ProviderConfig
-	baseURL         string
-	apiKey          string
-	log             *zap.Logger
-	Pricing         *PricingCache
-	requestTimeout  time.Duration
+	config     *models.ProviderConfig
+	baseURL    string
+	apiKey     string
+	log        *zap.Logger
+	Pricing    *PricingCache
+	httpClient *http.Client
 }
 
-func NewProvider(config *models.ProviderConfig, log *zap.Logger, timeouts *models.TimeoutConfig) (Provider, error) {
-	if config.Type != "openai_compatible" {
-		return nil, fmt.Errorf("unsupported provider type: %s", config.Type)
-	}
-
+func NewOpenAICompatibleProvider(config *models.ProviderConfig, log *zap.Logger, timeouts *models.TimeoutConfig) (*OpenAICompatibleProvider, error) {
 	baseURL := strings.TrimSuffix(config.BaseURL, "/")
+	requestTimeout := time.Duration(timeouts.ProviderTimeoutSeconds) * time.Second
 	pricingTimeout := time.Duration(timeouts.PricingFetchTimeoutSeconds) * time.Second
-	pricing := NewPricingCache(baseURL, config.APIKey, log, pricingTimeout)
+
+	httpClient := newHTTPClient(requestTimeout, config.TLSSkipVerify)
+	pricing := NewPricingCache(baseURL, config.APIKey, log, pricingTimeout, config.TLSSkipVerify)
 
 	if err := pricing.Fetch(); err != nil {
 		log.Warn("Failed to fetch initial pricing (will retry)", zap.Error(err))
@@ -43,13 +43,21 @@ func NewProvider(config *models.ProviderConfig, log *zap.Logger, timeouts *model
 	pricing.StartPeriodicRefresh(1 * time.Hour)
 
 	return &OpenAICompatibleProvider{
-		config:         config,
-		baseURL:        baseURL,
-		apiKey:         config.APIKey,
-		log:            log,
-		Pricing:        pricing,
-		requestTimeout: time.Duration(timeouts.ProviderTimeoutSeconds) * time.Second,
+		config:     config,
+		baseURL:    baseURL,
+		apiKey:     config.APIKey,
+		log:        log,
+		Pricing:    pricing,
+		httpClient: httpClient,
 	}, nil
+}
+
+func newHTTPClient(timeout time.Duration, tlsSkipVerify bool) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsSkipVerify {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opted-in
+	}
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
 
 func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req models.ChatCompletionRequest) (*models.ChatCompletionResponse, error) {
@@ -93,7 +101,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 			return nil, err
 		}
 	}
-	
+
 	p.log.Debug("Forwarding request to provider",
 		zap.String("model", req.Model),
 		zap.Int("messages", len(req.Messages)),
@@ -101,7 +109,6 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 
 	const maxRetries = 3
 	var lastErr error
-	client := &http.Client{Timeout: p.requestTimeout}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
@@ -127,7 +134,7 @@ func (p *OpenAICompatibleProvider) ChatCompletion(ctx context.Context, req model
 			httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 		}
 
-		resp, err := client.Do(httpReq)
+		resp, err := p.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
 			continue

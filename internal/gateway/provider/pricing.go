@@ -20,21 +20,21 @@ type ModelPricing struct {
 
 // PricingCache fetches and caches model pricing from OpenRouter.
 type PricingCache struct {
-	mu             sync.RWMutex
-	prices         map[string]ModelPricing
-	baseURL        string
-	apiKey         string
-	log            *zap.Logger
-	fetchTimeout   time.Duration
+	mu         sync.RWMutex
+	prices     map[string]ModelPricing
+	baseURL    string
+	apiKey     string
+	log        *zap.Logger
+	httpClient *http.Client
 }
 
-func NewPricingCache(baseURL, apiKey string, log *zap.Logger, fetchTimeout time.Duration) *PricingCache {
+func NewPricingCache(baseURL, apiKey string, log *zap.Logger, fetchTimeout time.Duration, tlsSkipVerify bool) *PricingCache {
 	return &PricingCache{
-		prices:       make(map[string]ModelPricing),
-		baseURL:      baseURL,
-		apiKey:       apiKey,
-		log:          log,
-		fetchTimeout: fetchTimeout,
+		prices:     make(map[string]ModelPricing),
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		log:        log,
+		httpClient: newHTTPClient(fetchTimeout, tlsSkipVerify),
 	}
 }
 
@@ -63,8 +63,7 @@ func (pc *PricingCache) Fetch() error {
 		req.Header.Set("Authorization", "Bearer "+pc.apiKey)
 	}
 
-	client := &http.Client{Timeout: pc.fetchTimeout}
-	resp, err := client.Do(req)
+	resp, err := pc.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("fetching models: %w", err)
 	}
