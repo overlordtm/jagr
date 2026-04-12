@@ -11,4 +11,4 @@ EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/jagr-gateway"]
 
-CMD ["-config", "/jagr/gateway.yaml"]
+CMD ["--config", "/jagr/gateway.yaml"]
