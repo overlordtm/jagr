@@ -26,6 +26,8 @@ func main() {
 		verbose               bool
 		hostname              string
 		tlsSkipVerify         bool
+		tlsServerName         string
+		tunnelAddr            string
 		maxToolFailures       int
 		httpTimeoutSec        int
 		commandTimeoutSec     int
@@ -127,6 +129,8 @@ func main() {
 				logger,
 				tlsSkipVerify,
 				time.Duration(httpTimeoutSec)*time.Second,
+				tlsServerName,
+				tunnelAddr,
 			)
 
 			// Create harness
@@ -158,6 +162,9 @@ func main() {
 	flags.BoolVar(&verbose, "verbose", false, "Verbose local logging (env: JAGR_VERBOSE)")
 	flags.StringVar(&hostname, "hostname", "", "Override hostname detection (env: JAGR_HOSTNAME)")
 	flags.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS certificate verification (trust self-signed certs) (env: JAGR_TLS_SKIP_VERIFY)")
+	flags.StringVar(&tlsServerName, "tls-server-name", "", "Override TLS SNI server name (useful when connecting through a tunnel) (env: JAGR_TLS_SERVER_NAME)")
+	flags.StringVar(&tunnelAddr, "tunnel-addr", "", "Internal: redirect all gateway TCP connections to this address (env: JAGR_TUNNEL_ADDR)")
+	flags.MarkHidden("tunnel-addr") //nolint:errcheck
 	flags.IntVar(&httpTimeoutSec, "http-timeout", 120, "HTTP request timeout in seconds for gateway communication (env: JAGR_HTTP_TIMEOUT)")
 	flags.IntVar(&commandTimeoutSec, "command-timeout", 300, "Default command execution timeout in seconds (env: JAGR_COMMAND_TIMEOUT)")
 	flags.IntVar(&longCommandTimeoutSec, "long-command-timeout", 900, "Long-running command execution timeout in seconds (env: JAGR_LONG_COMMAND_TIMEOUT)")
@@ -178,6 +185,8 @@ func main() {
 		bindBoolEnv(cmd, "verbose", "JAGR_VERBOSE", &verbose)
 		bindStringEnv(cmd, "hostname", "JAGR_HOSTNAME", &hostname)
 		bindBoolEnv(cmd, "tls-skip-verify", "JAGR_TLS_SKIP_VERIFY", &tlsSkipVerify)
+		bindStringEnv(cmd, "tls-server-name", "JAGR_TLS_SERVER_NAME", &tlsServerName)
+		bindStringEnv(cmd, "tunnel-addr", "JAGR_TUNNEL_ADDR", &tunnelAddr)
 		bindIntEnv(cmd, "http-timeout", "JAGR_HTTP_TIMEOUT", &httpTimeoutSec)
 		bindIntEnv(cmd, "command-timeout", "JAGR_COMMAND_TIMEOUT", &commandTimeoutSec)
 		bindIntEnv(cmd, "long-command-timeout", "JAGR_LONG_COMMAND_TIMEOUT", &longCommandTimeoutSec)

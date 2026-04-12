@@ -86,11 +86,16 @@ func RemoteExec(logger *zap.Logger, remoteHost string, gatewayURL string, localO
 		}
 		defer cleanup()
 
-		// Rewrite --gateway-url in args to point through the tunnel
-		args = rewriteArg(args, "--gateway-url", tunnelURL)
+		// Keep --gateway-url pointing at the original hostname so the remote
+		// agent sends the correct HTTP Host header and TLS SNI to Caddy.
+		// Inject --tunnel-addr so the agent's HTTP transport dials the tunnel
+		// address instead of resolving the hostname directly.
+		tunnelParsed, _ := url.Parse(tunnelURL)
+		args = injectArg(args, "--tunnel-addr", tunnelParsed.Host)
+
 		logger.Info("Gateway tunnel established",
 			zap.String("original_gateway", gatewayURL),
-			zap.String("tunnel_gateway", tunnelURL))
+			zap.String("tunnel_addr", tunnelParsed.Host))
 	}
 
 	// Use a fixed remote output directory; the agent will create the hostname
@@ -318,6 +323,18 @@ func forwardConnection(remoteConn net.Conn, localTarget string, logger *zap.Logg
 		done <- struct{}{}
 	}()
 	<-done
+}
+
+// injectArg adds --flag=value to args if the flag is not already present,
+// or replaces its value if it is.
+func injectArg(args []string, flag, value string) []string {
+	prefix := flag + "="
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return rewriteArg(args, flag, value)
+		}
+	}
+	return append(args, prefix+value)
 }
 
 // rewriteArg replaces the value of a --flag=value style argument in args.

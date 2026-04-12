@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -51,16 +53,49 @@ type GatewayClient struct {
 }
 
 // NewGatewayClient creates a new GatewayClient for communicating with the gateway.
-func NewGatewayClient(gatewayURL, apiKey, hostname, defaultModel string, logger *zap.Logger, tlsSkipVerify bool, httpTimeout time.Duration) *GatewayClient {
+//
+// tunnelAddr, when non-empty, causes all TCP connections to be dialled to that
+// address instead of the hostname in gatewayURL.  This lets the agent keep the
+// original hostname in the HTTP Host header and TLS SNI (so Caddy routes
+// correctly) while the actual TCP connection goes through a local SSH tunnel.
+//
+// tlsServerName overrides the TLS SNI explicitly; rarely needed when tunnelAddr
+// is used because the SNI is already derived from the original gatewayURL host.
+func NewGatewayClient(gatewayURL, apiKey, hostname, defaultModel string, logger *zap.Logger, tlsSkipVerify bool, httpTimeout time.Duration, tlsServerName, tunnelAddr string) *GatewayClient {
 	if httpTimeout == 0 {
 		httpTimeout = DefaultHTTPTimeout
 	}
 	httpClient := &http.Client{Timeout: httpTimeout}
-	if tlsSkipVerify {
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+
+	var tlsCfg *tls.Config
+	if tlsSkipVerify || tlsServerName != "" {
+		tlsCfg = &tls.Config{}
+		if tlsSkipVerify {
+			tlsCfg.InsecureSkipVerify = true
+			logger.Warn("TLS certificate verification disabled")
 		}
-		logger.Warn("TLS certificate verification disabled")
+		if tlsServerName != "" {
+			tlsCfg.ServerName = tlsServerName
+			logger.Debug("TLS server name (SNI) override", zap.String("server_name", tlsServerName))
+		}
+	}
+
+	if tunnelAddr != "" {
+		// Redirect all TCP connections to the tunnel address while keeping the
+		// original URL host in the Host header and TLS SNI.
+		logger.Info("Routing gateway connections through tunnel", zap.String("tunnel_addr", tunnelAddr))
+		fixedAddr := tunnelAddr // capture for closure
+		transport := &http.Transport{
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, fixedAddr)
+			},
+		}
+		if tlsCfg != nil {
+			transport.TLSClientConfig = tlsCfg
+		}
+		httpClient.Transport = transport
+	} else if tlsCfg != nil {
+		httpClient.Transport = &http.Transport{TLSClientConfig: tlsCfg}
 	}
 
 	return &GatewayClient{
