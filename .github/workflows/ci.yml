@@ -68,7 +68,6 @@ jobs:
       - run: |
           mkdir -p dist
           GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -o dist/jagr-gateway-linux-amd64 ./cmd/gateway
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -o dist/jagr-gateway-linux-arm64 ./cmd/gateway
       - uses: actions/upload-artifact@v4
         with:
           name: gateway-binaries
@@ -168,8 +167,7 @@ jobs:
       - name: Build gateway binaries
         run: |
           mkdir -p dist
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/jagr-gateway-linux-amd64 ./cmd/gateway
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o dist/jagr-gateway-linux-arm64 ./cmd/gateway
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -o dist/jagr-gateway-linux-amd64 ./cmd/gateway
       - uses: actions/upload-artifact@v4
         with:
           name: gateway-binaries-nightly
