@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -175,7 +176,10 @@ func (g *Gateway) startDashboard() {
 		listen = ":8080"
 	}
 
-	dash := dashboard.New(g.store, g.log.Named("dashboard"), &g.config.Dashboard, g.config)
+	dash, err := dashboard.New(context.Background(), g.store, g.log.Named("dashboard"), &g.config.Dashboard, g.config)
+	if err != nil {
+		g.log.Fatal("Failed to initialise dashboard", zap.Error(err))
+	}
 	dashRouter := mux.NewRouter()
 	dash.SetupRoutes(dashRouter)
 

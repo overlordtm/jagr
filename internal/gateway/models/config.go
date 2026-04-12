@@ -50,11 +50,25 @@ type DashboardConfig struct {
 	Enabled bool              `yaml:"enabled"`
 	Listen  string            `yaml:"listen"`
 	Users   []DashboardUser   `yaml:"users,omitempty"`
+	OIDC    *OIDCConfig       `yaml:"oidc,omitempty"`
 }
 
 type DashboardUser struct {
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+}
+
+// OIDCConfig configures Keycloak (or any OIDC-compliant) authentication for the dashboard.
+type OIDCConfig struct {
+	// IssuerURL is the Keycloak realm URL, e.g. https://keycloak.example.com/realms/myrealm
+	IssuerURL    string `yaml:"issuer_url"`
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	// RedirectURL must match the redirect URI registered in Keycloak,
+	// e.g. https://dashboard.example.com/auth/callback
+	RedirectURL  string `yaml:"redirect_url"`
+	// SessionTTLMinutes is how long a dashboard session lasts (default: 480 = 8h)
+	SessionTTLMinutes int `yaml:"session_ttl_minutes,omitempty"`
 }
 
 type ServerConfig struct {
