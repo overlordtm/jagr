@@ -357,6 +357,8 @@ func TestJagrHarness_StartTime(t *testing.T) {
 		logger,
 		false,
 		0,
+		"",
+		"",
 	)
 
 	harness := NewJagrHarness(
