@@ -1126,12 +1126,6 @@ func (g *Gateway) getMemosHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := g.store.GetSessionForAgent(agent.ID)
-	if err != nil {
-		http.Error(w, "no active session", http.StatusBadRequest)
-		return
-	}
-
 	q := r.URL.Query()
 	scope := q.Get("scope")
 	host := q.Get("host")
@@ -1149,6 +1143,11 @@ func (g *Gateway) getMemosHandler(w http.ResponseWriter, r *http.Request) {
 	// For agent-scoped memos, filter by session_id
 	sessionFilter := ""
 	if scope == "agent" {
+		session, err := g.store.GetSessionForAgent(agent.ID)
+		if err != nil {
+			http.Error(w, "no active session", http.StatusBadRequest)
+			return
+		}
 		sessionFilter = session.ID
 	}
 

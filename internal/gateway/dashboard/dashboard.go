@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -364,6 +365,13 @@ func (d *Dashboard) SetupRoutes(router *mux.Router) {
 	router.Handle("/partials/memos", wrap(d.allMemosPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/memos", wrap(d.agentMemosPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/memos", wrap(d.sessionMemosPartial)).Methods("GET")
+
+	// Mutation endpoints
+	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}", wrap(d.deleteSessionPartial)).Methods("DELETE")
+	router.Handle("/partials/memos/{memo_id}", wrap(d.getMemoPartial)).Methods("GET")
+	router.Handle("/partials/memos/{memo_id}/edit", wrap(d.getMemoEditPartial)).Methods("GET")
+	router.Handle("/partials/memos/{memo_id}", wrap(d.updateMemoPartial)).Methods("PATCH")
+	router.Handle("/partials/memos/{memo_id}", wrap(d.deleteMemoPartial)).Methods("DELETE")
 }
 
 func (d *Dashboard) basicAuthMiddleware(next http.Handler) http.Handler {
@@ -807,6 +815,102 @@ func (d *Dashboard) sessionMemosPartial(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	d.render(w, "memos_partial", memos)
+}
+
+func (d *Dashboard) deleteSessionPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	sessionID := vars["session_id"]
+
+	if err := d.store.DeleteSession(sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return empty body — htmx outerHTML swap removes the row
+	w.WriteHeader(http.StatusOK)
+}
+
+func (d *Dashboard) getMemoPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	memo, err := d.store.GetMemo(memoID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	d.render(w, "memo_row", memo)
+}
+
+func (d *Dashboard) getMemoEditPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	memo, err := d.store.GetMemo(memoID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	d.render(w, "memo_edit_form", memo)
+}
+
+func (d *Dashboard) updateMemoPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	content := r.FormValue("content")
+	if content == "" {
+		http.Error(w, "content required", http.StatusBadRequest)
+		return
+	}
+
+	if err := d.store.UpdateMemo(memoID, content); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	memo, err := d.store.GetMemo(memoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	d.render(w, "memo_row", memo)
+}
+
+func (d *Dashboard) deleteMemoPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	if err := d.store.DeleteMemo(memoID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return empty body — htmx outerHTML swap removes the element
+	w.WriteHeader(http.StatusOK)
 }
 
 func (d *Dashboard) render(w http.ResponseWriter, name string, data any) {
