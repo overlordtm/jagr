@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 )
 
 // ContextStrategy determines how raw conversation history is transformed
@@ -13,6 +12,8 @@ type ContextStrategy interface {
 	// Select receives the full raw history and returns the messages
 	// that should be sent to the LLM for the next request.
 	Select(history []Message) []Message
+	// Compact performs an in-place reduction of the history
+	Compact(history []Message) ([]Message, error)
 }
 
 // FullHistoryStrategy returns the entire conversation history unchanged.
@@ -22,6 +23,10 @@ func (s *FullHistoryStrategy) Select(history []Message) []Message {
 	return history
 }
 
+func (s *FullHistoryStrategy) Compact(history []Message) ([]Message, error) {
+	return history, nil
+}
+
 // Summarizer is a function that takes a slice of messages and returns a
 // concise summary string. It is typically backed by an LLM call through
 // the gateway.
@@ -29,22 +34,15 @@ type Summarizer func(messages []Message) (string, error)
 
 // RollingWindowStrategy keeps the last m messages in raw form and the last t
 // tool-call pairs (assistant message with ToolCalls + its tool-result messages).
-// Older messages outside both windows are summarized via an LLM call and
-// replaced with a single system message containing the summary.
-//
-// Summaries are cached: if the set of messages to compress hasn't changed
-// since the last call, the cached summary is reused without another LLM call.
+// Older messages outside both windows are truncated into bullet points locally.
+// When explicitly compacted, an LLM call summarizes the old items permanently.
 type RollingWindowStrategy struct {
 	// MaxRawMessages is the number of most-recent messages to keep verbatim.
 	MaxRawMessages int
 	// MaxToolCalls is the number of most-recent tool-call pairs to keep verbatim.
 	MaxToolCalls int
-	// Summarize is called to produce an LLM summary of compressed messages.
+	// Summarize is called during Compact to produce an LLM summary of compressed messages.
 	Summarize Summarizer
-
-	mu            sync.Mutex
-	cachedHash    string // JSON hash of the last compressed block
-	cachedSummary string // the LLM summary for that block
 }
 
 func (s *RollingWindowStrategy) Select(history []Message) []Message {
@@ -114,8 +112,8 @@ func (s *RollingWindowStrategy) Select(history []Message) []Message {
 		return history
 	}
 
-	// Summarize the compressed block (with caching).
-	summary := s.summarize(toCompress)
+	// Summarize the compressed block locally to save output tokens.
+	summary := fallbackCompress(toCompress)
 
 	// --- build output ---
 	var result []Message
@@ -127,8 +125,8 @@ func (s *RollingWindowStrategy) Select(history []Message) []Message {
 			// Insert the summary system message in place of the first
 			// compressed message to preserve conversation order.
 			result = append(result, Message{
-				Role:    "system",
-				Content: "Prior conversation history was summarized to save context. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
+				Role:    "user",
+				Content: "[System Note] Prior conversation history was summarized locally. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
 			})
 			compressed = true
 		}
@@ -138,32 +136,82 @@ func (s *RollingWindowStrategy) Select(history []Message) []Message {
 	return result
 }
 
-// summarize produces a summary for the given messages, using the cache when
-// the input hasn't changed.
-func (s *RollingWindowStrategy) summarize(msgs []Message) string {
-	key, _ := json.Marshal(msgs)
-	keyStr := string(key)
-
-	s.mu.Lock()
-	if keyStr == s.cachedHash && s.cachedSummary != "" {
-		summary := s.cachedSummary
-		s.mu.Unlock()
-		return summary
+func (s *RollingWindowStrategy) Compact(history []Message) ([]Message, error) {
+	n := len(history)
+	if n == 0 {
+		return history, nil
 	}
-	s.mu.Unlock()
 
-	summary, err := s.Summarize(msgs)
+	// Re-run the exact same protection logic to capture the exact slice we need to permanently summarize
+	protected := make([]bool, n)
+	rawStart := n - s.MaxRawMessages
+	if rawStart < 0 {
+		rawStart = 0
+	}
+	for i := rawStart; i < n; i++ {
+		protected[i] = true
+	}
+
+	kept := 0
+	for i := n - 1; i >= 0 && kept < s.MaxToolCalls; i-- {
+		if history[i].Role == "assistant" && len(history[i].ToolCalls) > 0 {
+			ids := make(map[string]bool, len(history[i].ToolCalls))
+			for _, tc := range history[i].ToolCalls {
+				ids[tc.ID] = true
+			}
+			protected[i] = true
+			for j := i + 1; j < n; j++ {
+				if history[j].Role == "tool" && ids[history[j].ToolCallID] {
+					protected[j] = true
+				} else if history[j].Role != "tool" {
+					break
+				}
+			}
+			kept++
+		}
+	}
+
+	if n > 0 {
+		protected[0] = true
+	}
+	for i := 0; i < n; i++ {
+		if history[i].Role == "user" {
+			protected[i] = true
+			break
+		}
+	}
+
+	var toCompress []Message
+	for i, msg := range history {
+		if !protected[i] {
+			toCompress = append(toCompress, msg)
+		}
+	}
+
+	if len(toCompress) == 0 {
+		return history, nil
+	}
+
+	summary, err := s.Summarize(toCompress)
 	if err != nil || summary == "" {
-		// Fall back to a simple bullet-point compression if LLM fails.
-		summary = fallbackCompress(msgs)
+		return nil, fmt.Errorf("summarization failed: %w", err)
 	}
 
-	s.mu.Lock()
-	s.cachedHash = keyStr
-	s.cachedSummary = summary
-	s.mu.Unlock()
+	var result []Message
+	compressed := false
+	for i, msg := range history {
+		if protected[i] {
+			result = append(result, msg)
+		} else if !compressed {
+			result = append(result, Message{
+				Role:    "user",
+				Content: "[System Note] Prior conversation history was summarized to save context. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
+			})
+			compressed = true
+		}
+	}
 
-	return summary
+	return result, nil
 }
 
 // fallbackCompress produces a bullet-point summary when the LLM summarizer

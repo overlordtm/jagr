@@ -42,8 +42,6 @@ func EnrichSUID(runner Runner) string {
 		pkg := getPackageOwner(runner, path)
 		if pkg != "" {
 			b.WriteString(fmt.Sprintf("   Package: %s\n", pkg))
-		} else {
-			b.WriteString("   Package: NOT from any installed package\n")
 		}
 
 		// File type
@@ -79,8 +77,6 @@ func EnrichSUID(runner Runner) string {
 			pkg := getPackageOwner(runner, parts[0])
 			if pkg != "" {
 				b.WriteString(fmt.Sprintf("   Package: %s\n", pkg))
-			} else {
-				b.WriteString("   Package: NOT from any installed package\n")
 			}
 		}
 	}
@@ -89,12 +85,16 @@ func EnrichSUID(runner Runner) string {
 }
 
 func getPackageOwner(runner Runner, path string) string {
+	// dpkg -S outputs "package: /path" — BusyBox dpkg doesn't support -S,
+	// so validate the output contains ": " to avoid false results.
 	stdout, _, exitCode, _ := runner.ExecuteTrusted("dpkg", []string{"-S", path})
-	if exitCode == 0 && stdout != "" {
+	if exitCode == 0 && strings.Contains(stdout, ": ") {
 		return strings.TrimSpace(strings.SplitN(stdout, "\n", 2)[0])
 	}
+	// rpm -qf outputs "package-version.arch" — BusyBox rpm doesn't support -qf.
 	stdout, _, exitCode, _ = runner.ExecuteTrusted("rpm", []string{"-qf", path})
-	if exitCode == 0 && stdout != "" && !strings.Contains(stdout, "not owned") {
+	if exitCode == 0 && stdout != "" && !strings.Contains(stdout, "not owned") &&
+		!strings.Contains(stdout, "BusyBox") && !strings.Contains(stdout, "Usage:") {
 		return strings.TrimSpace(stdout)
 	}
 	return ""

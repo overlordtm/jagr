@@ -599,6 +599,11 @@ func (s *Store) UpdateFindingStatus(sessionID, findingID, status string) error {
 	return err
 }
 
+func (s *Store) UpdateFindingStatusByPK(id int, status string) error {
+	_, err := s.db.Exec(`UPDATE session_findings SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
 func (s *Store) GetSessionFindings(sessionID string) ([]models.SessionFinding, error) {
 	rows, err := s.db.Query(`
 		SELECT id, session_id, finding_id, type, severity, observable, analysis, evidence, status, created_at
@@ -869,6 +874,83 @@ func (s *Store) GetAllMemos(limit int) ([]models.Memo, error) {
 		memos = append(memos, m)
 	}
 	return memos, rows.Err()
+}
+
+// GetMemo retrieves a single memo by ID.
+func (s *Store) GetMemo(id string) (*models.Memo, error) {
+	var m models.Memo
+	var agentName sql.NullString
+	err := s.db.QueryRow(`
+		SELECT id, exercise_id, session_id, host, scope, content, memo_type, agent_name, created_at
+		FROM memos WHERE id = ?
+	`, id).Scan(&m.ID, &m.ExerciseID, &m.SessionID, &m.Host, &m.Scope, &m.Content, &m.MemoType, &agentName, &m.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if agentName.Valid {
+		m.AgentName = agentName.String
+	}
+	return &m, nil
+}
+
+// DeleteMemo removes a memo by ID.
+func (s *Store) DeleteMemo(id string) error {
+	result, err := s.db.Exec(`DELETE FROM memos WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateMemo updates the content of a memo by ID.
+func (s *Store) UpdateMemo(id, content string) error {
+	result, err := s.db.Exec(`UPDATE memos SET content = ? WHERE id = ?`, content, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteSession removes a session and all associated data (messages, findings,
+// reports, agent configs, memos) in a single transaction.
+func (s *Store) DeleteSession(sessionID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, q := range []string{
+		`DELETE FROM messages WHERE session_id = ?`,
+		`DELETE FROM session_findings WHERE session_id = ?`,
+		`DELETE FROM session_reports WHERE session_id = ?`,
+		`DELETE FROM session_agent_configs WHERE session_id = ?`,
+		`DELETE FROM memos WHERE session_id = ?`,
+		`DELETE FROM sessions WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, sessionID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *Store) Close() error {

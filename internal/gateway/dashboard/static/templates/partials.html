@@ -68,11 +68,13 @@
             <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Report</th>
             <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
             <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Updated</th>
+            <th class="px-5 py-3"></th>
         </tr>
     </thead>
     <tbody>
+        {{$agentID := .AgentID}}
         {{range .Sessions}}
-        <tr class="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors" onclick="window.location='/agents/{{.AgentID}}/sessions/{{.ID}}'">
+        <tr id="session-row-{{.ID}}" class="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors" onclick="window.location='/agents/{{.AgentID}}/sessions/{{.ID}}'">
             <td class="px-5 py-4">
                 <span class="font-mono text-sm text-gray-300">{{shortID .ID}}</span>
             </td>
@@ -95,6 +97,13 @@
             </td>
             <td class="px-5 py-4 text-sm text-gray-500">{{timeAgo .CreatedAt}}</td>
             <td class="px-5 py-4 text-sm text-gray-500">{{timeAgo .UpdatedAt}}</td>
+            <td class="px-5 py-4" onclick="event.stopPropagation()">
+                <button class="text-xs text-gray-600 hover:text-red-400 transition-colors px-1.5 py-0.5 rounded hover:bg-gray-800"
+                        hx-delete="/partials/agents/{{$agentID}}/sessions/{{.ID}}"
+                        hx-target="#session-row-{{.ID}}"
+                        hx-swap="outerHTML"
+                        hx-confirm="Delete this session and all its data? This cannot be undone.">Delete</button>
+            </td>
         </tr>
         {{end}}
     </tbody>
@@ -402,7 +411,7 @@
 {{end}}
 
 {{define "agent_findings_partial"}}
-{{if .}}
+{{if .Findings}}
 <table class="min-w-full">
     <thead>
         <tr class="border-b border-gray-800">
@@ -416,7 +425,8 @@
         </tr>
     </thead>
     <tbody>
-        {{range .}}
+        {{$agentID := .AgentID}}
+        {{range .Findings}}
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/50 transition-colors">
             <td class="px-5 py-4 text-sm font-mono text-gray-300">{{.FindingID}}</td>
             <td class="px-5 py-4">
@@ -425,7 +435,14 @@
             <td class="px-5 py-4 text-sm text-gray-300">{{.Type}}</td>
             <td class="px-5 py-4 text-sm text-gray-300">{{truncate .Observable 60}}</td>
             <td class="px-5 py-4">
-                <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold {{statusColor .Status}}">{{.Status}}</span>
+                <select class="finding-status-select bg-gray-800 text-xs font-medium rounded-lg px-2 py-1 border border-gray-700 focus:outline-none focus:border-gray-600 {{statusColor .Status}}"
+                        data-finding-id="{{.ID}}"
+                        onchange="updateFindingStatus(this.dataset.findingId, this.value, this)">
+                    <option value="preliminary" {{if eq .Status "preliminary"}}selected{{end}}>preliminary</option>
+                    <option value="valid"       {{if eq .Status "valid"}}selected{{end}}>valid</option>
+                    <option value="invalid"     {{if eq .Status "invalid"}}selected{{end}}>invalid</option>
+                    <option value="duplicate"   {{if eq .Status "duplicate"}}selected{{end}}>duplicate</option>
+                </select>
             </td>
             <td class="px-5 py-4">
                 <span class="font-mono text-xs text-gray-500">{{shortID .SessionID}}</span>
@@ -454,7 +471,7 @@
 </table>
 {{else}}
 <div class="p-12 text-center">
-    <p class="text-gray-600">No findings recorded for this host.</p>
+    <p class="text-gray-600">No findings match the current filters.</p>
 </div>
 {{end}}
 {{end}}
@@ -482,31 +499,72 @@
 {{end}}
 {{end}}
 
+{{define "memo_row"}}
+<div id="memo-{{.ID}}" class="px-5 py-4">
+    <div class="flex items-start gap-3">
+        <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap mb-2">
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{memoTypeColor .MemoType}}">{{.MemoType}}</span>
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{scopeColor .Scope}}">{{.Scope}}</span>
+                {{if .Host}}<span class="text-xs font-mono text-gray-500">{{.Host}}</span>{{end}}
+                {{if .AgentName}}<span class="text-xs text-gray-600">by {{.AgentName}}</span>{{end}}
+                <span class="ml-auto text-xs text-gray-600">{{timeAgo .CreatedAt}}</span>
+                <div class="flex items-center gap-1 shrink-0">
+                    <button class="text-xs text-gray-600 hover:text-sky-400 transition-colors px-1.5 py-0.5 rounded hover:bg-gray-800"
+                            hx-get="/partials/memos/{{.ID}}/edit"
+                            hx-target="#memo-{{.ID}}"
+                            hx-swap="outerHTML">Edit</button>
+                    <button class="text-xs text-gray-600 hover:text-red-400 transition-colors px-1.5 py-0.5 rounded hover:bg-gray-800"
+                            hx-delete="/partials/memos/{{.ID}}"
+                            hx-target="#memo-{{.ID}}"
+                            hx-swap="outerHTML"
+                            hx-confirm="Delete this memo?">Delete</button>
+                </div>
+            </div>
+            {{if isLong .Content}}
+            <details>
+                <summary class="text-sm text-gray-300 cursor-pointer hover:text-white transition-colors whitespace-pre-wrap break-words leading-relaxed">{{previewContent .Content}}</summary>
+                <div class="mt-2 text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
+            </details>
+            {{else}}
+            <p class="text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">{{.Content}}</p>
+            {{end}}
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "memo_edit_form"}}
+<div id="memo-{{.ID}}" class="px-5 py-4 bg-gray-800/20 border-l-2 border-sky-500/40">
+    <div class="flex items-center gap-2 flex-wrap mb-3">
+        <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{memoTypeColor .MemoType}}">{{.MemoType}}</span>
+        <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{scopeColor .Scope}}">{{.Scope}}</span>
+        {{if .Host}}<span class="text-xs font-mono text-gray-500">{{.Host}}</span>{{end}}
+        {{if .AgentName}}<span class="text-xs text-gray-600">by {{.AgentName}}</span>{{end}}
+    </div>
+    <form hx-patch="/partials/memos/{{.ID}}"
+          hx-target="#memo-{{.ID}}"
+          hx-swap="outerHTML">
+        <textarea name="content"
+                  class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-sky-600 resize-y min-h-[80px] leading-relaxed">{{.Content}}</textarea>
+        <div class="flex items-center gap-2 mt-2">
+            <button type="submit"
+                    class="px-3 py-1.5 text-xs font-medium rounded-md bg-sky-700 text-white hover:bg-sky-600 transition-colors">Save</button>
+            <button type="button"
+                    class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors"
+                    hx-get="/partials/memos/{{.ID}}"
+                    hx-target="#memo-{{.ID}}"
+                    hx-swap="outerHTML">Cancel</button>
+        </div>
+    </form>
+</div>
+{{end}}
+
 {{define "memos_partial"}}
 {{if .}}
 <div class="divide-y divide-gray-800/50">
     {{range .}}
-    <div class="px-5 py-4">
-        <div class="flex items-start gap-3">
-            <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 flex-wrap mb-2">
-                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{memoTypeColor .MemoType}}">{{.MemoType}}</span>
-                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{scopeColor .Scope}}">{{.Scope}}</span>
-                    {{if .Host}}<span class="text-xs font-mono text-gray-500">{{.Host}}</span>{{end}}
-                    {{if .AgentName}}<span class="text-xs text-gray-600">by {{.AgentName}}</span>{{end}}
-                    <span class="ml-auto text-xs text-gray-600">{{timeAgo .CreatedAt}}</span>
-                </div>
-                {{if isLong .Content}}
-                <details>
-                    <summary class="text-sm text-gray-300 cursor-pointer hover:text-white transition-colors whitespace-pre-wrap break-words leading-relaxed">{{previewContent .Content}}</summary>
-                    <div class="mt-2 text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
-                </details>
-                {{else}}
-                <p class="text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">{{.Content}}</p>
-                {{end}}
-            </div>
-        </div>
-    </div>
+    {{template "memo_row" .}}
     {{end}}
 </div>
 {{else}}

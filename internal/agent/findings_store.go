@@ -96,6 +96,20 @@ func (fs *FindingsStore) GetSummary() FindingSummary {
 	}
 }
 
+// GetByAgent returns all findings submitted by the named agent.
+func (fs *FindingsStore) GetByAgent(agentName string) []Finding {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	var result []Finding
+	for _, f := range fs.findings {
+		if f.AgentName == agentName {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
 // Count returns the number of stored findings.
 func (fs *FindingsStore) Count() int {
 	fs.mu.Lock()

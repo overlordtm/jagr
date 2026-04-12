@@ -99,11 +99,13 @@ func (h *JagrHarness) Run() error {
 		}
 
 		var objBuilder strings.Builder
-		objBuilder.WriteString("## Target Host Context\n\n")
-		objBuilder.WriteString(hostContext)
+
 		if systemOverview != "" {
 			objBuilder.WriteString("\n\n## System Overview\n\n")
 			objBuilder.WriteString(systemOverview)
+		} else {
+			objBuilder.WriteString("## Target Host Context\n\n")
+			objBuilder.WriteString(hostContext)
 		}
 		objBuilder.WriteString("\n\nBegin your investigation phase.")
 		objective := objBuilder.String()
@@ -183,6 +185,7 @@ func (h *JagrHarness) runSystemOverview(hostContext string) string {
 	}
 	objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nDetermine the purpose of this system and identify all network-exposed services. Write your findings as a memo with type 'system_overview'.", hostContext)
 	agent := NewAiAgent(h, "system_overview", "system_overview", prompt, objective, GetToolsForRole("system_overview"))
+	agent.maxIter = 10
 	if err := agent.Run(); err != nil {
 		h.logger.Error("system_overview agent failed", zap.Error(err))
 		return ""
@@ -201,12 +204,39 @@ func (h *JagrHarness) runSystemOverview(hostContext string) string {
 }
 
 func (h *JagrHarness) runInvestigator(target, contextStr string) error {
+	if h.isSelfTarget(target) {
+		h.logger.Info("Skipping self-investigation target", zap.String("target", target))
+		return nil
+	}
+
 	name := fmt.Sprintf("investigator-%d", atomic.AddInt64(&h.investigatorCounter, 1))
 	objective := fmt.Sprintf("Analyze target: %s\nContext: %s", target, contextStr)
 	prompt, _ := GetPrompt("investigator", nil)
 	investigator := NewAiAgent(h, name, "investigator", prompt, objective, GetToolsForRole("investigator"))
 	investigator.maxIter = defaultInvestigatorMaxIter
 	return investigator.Run()
+}
+
+// isSelfTarget returns true if the target path refers to the agent's own
+// binary or any file inside the clean room work directory.
+func (h *JagrHarness) isSelfTarget(target string) bool {
+	// Check against clean room directory
+	if h.cleanRoom != nil && h.cleanRoom.WorkDir != "" {
+		if strings.HasPrefix(target, h.cleanRoom.WorkDir) {
+			return true
+		}
+	}
+
+	// Check against our own executable path
+	if selfPath, err := os.Executable(); err == nil {
+		selfPath, _ = filepath.EvalSymlinks(selfPath)
+		resolved, _ := filepath.EvalSymlinks(target)
+		if selfPath == resolved {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *JagrHarness) heartbeatLoop(done <-chan struct{}) {
@@ -241,7 +271,7 @@ func (h *JagrHarness) collectHostContext() string {
 	if out, _, _, err := h.cleanRoom.ExecuteTrusted("ip", []string{"r"}); err == nil && out != "" {
 		sections = append(sections, "### Routes\n"+strings.TrimSpace(out))
 	}
-	if out, _, _, err := h.cleanRoom.ExecuteTrusted("ss", []string{"-tuln"}); err == nil && out != "" {
+	if out, _, _, err := h.cleanRoom.ExecuteTrusted("netstat", []string{"-tuln"}); err == nil && out != "" {
 		sections = append(sections, "### Listening Ports\n"+strings.TrimSpace(out))
 	}
 	if out, _, _, err := h.cleanRoom.ExecuteTrusted("who", nil); err == nil && out != "" {

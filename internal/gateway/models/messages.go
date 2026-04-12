@@ -79,7 +79,7 @@ type ErrorResponse struct {
 type ErrorInfo struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
-	Code    string `json:"code"`
+	Code    any    `json:"code"`
 }
 
 type Model struct {

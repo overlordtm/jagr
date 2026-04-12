@@ -26,6 +26,16 @@ func (c *ContextMagic) Messages() []Message {
 	return c.strategy.Select(c.history)
 }
 
+// Compact triggers an in-place reduction of the raw history.
+func (c *ContextMagic) Compact() error {
+	newHistory, err := c.strategy.Compact(c.history)
+	if err != nil {
+		return err
+	}
+	c.history = newHistory
+	return nil
+}
+
 // RawHistory returns the full unfiltered conversation history.
 func (c *ContextMagic) RawHistory() []Message {
 	return c.history

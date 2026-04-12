@@ -1,20 +1,27 @@
 package dashboard
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
 
 	"github.com/overlordtm/jagr/internal/gateway/db"
 	"github.com/overlordtm/jagr/internal/gateway/models"
@@ -306,39 +313,85 @@ type parsedToolCall struct {
 	FindingObservable string
 }
 
+// oidcSession holds the authenticated user info for a dashboard browser session.
+type oidcSession struct {
+	Subject string
+	Email   string
+	Name    string
+	Expiry  time.Time
+}
+
 type Dashboard struct {
 	store      *db.Store
 	log        *zap.Logger
 	config     *models.DashboardConfig
 	fullConfig *models.Config
+
+	// OIDC fields — nil when OIDC is not configured.
+	oidcProvider *gooidc.Provider
+	oauth2Config *oauth2.Config
+
+	sessionMu sync.RWMutex
+	sessions  map[string]oidcSession // cookie-token → session
 }
 
-func New(store *db.Store, log *zap.Logger, config *models.DashboardConfig, fullConfig *models.Config) *Dashboard {
-	return &Dashboard{
+// New creates the Dashboard. If OIDC is configured in cfg it contacts the
+// issuer to fetch provider metadata (OIDC discovery). Call this during
+// server start-up so a misconfigured issuer URL fails fast.
+func New(ctx context.Context, store *db.Store, log *zap.Logger, config *models.DashboardConfig, fullConfig *models.Config) (*Dashboard, error) {
+	d := &Dashboard{
 		store:      store,
 		log:        log,
 		config:     config,
 		fullConfig: fullConfig,
+		sessions:   make(map[string]oidcSession),
 	}
+
+	if config.OIDC != nil {
+		provider, err := gooidc.NewProvider(ctx, config.OIDC.IssuerURL)
+		if err != nil {
+			return nil, fmt.Errorf("OIDC provider discovery failed for %q: %w", config.OIDC.IssuerURL, err)
+		}
+		d.oidcProvider = provider
+		d.oauth2Config = &oauth2.Config{
+			ClientID:     config.OIDC.ClientID,
+			ClientSecret: config.OIDC.ClientSecret,
+			RedirectURL:  config.OIDC.RedirectURL,
+			Endpoint:     provider.Endpoint(),
+			Scopes:       []string{gooidc.ScopeOpenID, "profile", "email"},
+		}
+		log.Info("OIDC authentication enabled", zap.String("issuer", config.OIDC.IssuerURL))
+	}
+
+	return d, nil
 }
 
 func (d *Dashboard) SetupRoutes(router *mux.Router) {
-	// Serve built Vite assets
+	// Serve built Vite assets (always public — no auth needed for static assets).
 	assetsFS, _ := fs.Sub(staticFiles, "static/assets")
 	router.PathPrefix("/assets/").Handler(
 		http.StripPrefix("/assets/", http.FileServer(http.FS(assetsFS))),
 	)
 
-	// Apply auth middleware if users are configured
-	var handler func(http.Handler) http.Handler
-	if len(d.config.Users) > 0 {
-		handler = d.basicAuthMiddleware
+	// OIDC auth endpoints (public — no auth middleware applied).
+	if d.oidcProvider != nil {
+		router.Handle("/auth/login", http.HandlerFunc(d.oidcLoginHandler)).Methods("GET")
+		router.Handle("/auth/callback", http.HandlerFunc(d.oidcCallbackHandler)).Methods("GET")
+		router.Handle("/auth/logout", http.HandlerFunc(d.oidcLogoutHandler)).Methods("GET")
+	}
+
+	// Choose auth middleware: OIDC takes priority, then basic auth, then none.
+	var authMiddleware func(http.Handler) http.Handler
+	if d.oidcProvider != nil {
+		authMiddleware = d.oidcSessionMiddleware
+	} else if len(d.config.Users) > 0 {
+		authMiddleware = d.basicAuthMiddleware
 	}
 
 	wrap := func(h http.HandlerFunc) http.Handler {
 		var out http.Handler = h
-		if handler != nil {
-			out = handler(out)
+		if authMiddleware != nil {
+			out = authMiddleware(out)
 		}
 		return out
 	}
@@ -359,10 +412,165 @@ func (d *Dashboard) SetupRoutes(router *mux.Router) {
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/report", wrap(d.sessionReportPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/agent-configs", wrap(d.sessionAgentConfigsPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/findings", wrap(d.agentFindingsPartial)).Methods("GET")
+	router.Handle("/partials/findings/{id}/status", wrap(d.updateFindingStatusPartial)).Methods("PATCH")
 	router.Handle("/partials/agents/{agent_id}/reports", wrap(d.agentReportsPartial)).Methods("GET")
 	router.Handle("/partials/memos", wrap(d.allMemosPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/memos", wrap(d.agentMemosPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/memos", wrap(d.sessionMemosPartial)).Methods("GET")
+
+	// Mutation endpoints
+	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}", wrap(d.deleteSessionPartial)).Methods("DELETE")
+	router.Handle("/partials/memos/{memo_id}", wrap(d.getMemoPartial)).Methods("GET")
+	router.Handle("/partials/memos/{memo_id}/edit", wrap(d.getMemoEditPartial)).Methods("GET")
+	router.Handle("/partials/memos/{memo_id}", wrap(d.updateMemoPartial)).Methods("PATCH")
+	router.Handle("/partials/memos/{memo_id}", wrap(d.deleteMemoPartial)).Methods("DELETE")
+}
+
+// ─── OIDC helpers ────────────────────────────────────────────────────────────
+
+const (
+	cookieSession = "jagr_session"
+	cookieState   = "jagr_oidc_state"
+)
+
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func (d *Dashboard) sessionTTL() time.Duration {
+	ttl := d.config.OIDC.SessionTTLMinutes
+	if ttl <= 0 {
+		ttl = 480 // 8 hours default
+	}
+	return time.Duration(ttl) * time.Minute
+}
+
+// oidcLoginHandler redirects the browser to Keycloak.
+func (d *Dashboard) oidcLoginHandler(w http.ResponseWriter, r *http.Request) {
+	state, err := randomToken()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieState,
+		Value:    state,
+		Path:     "/",
+		MaxAge:   300, // 5 min — enough for the round-trip
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(w, r, d.oauth2Config.AuthCodeURL(state), http.StatusFound)
+}
+
+// oidcCallbackHandler handles the redirect back from Keycloak, validates the
+// ID token, and creates a local session cookie.
+func (d *Dashboard) oidcCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	// Validate state cookie (CSRF protection).
+	stateCookie, err := r.Cookie(cookieState)
+	if err != nil || stateCookie.Value != r.URL.Query().Get("state") {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+	// Clear the state cookie.
+	http.SetCookie(w, &http.Cookie{Name: cookieState, Path: "/", MaxAge: -1})
+
+	// Exchange authorization code for tokens.
+	token, err := d.oauth2Config.Exchange(r.Context(), r.URL.Query().Get("code"))
+	if err != nil {
+		d.log.Warn("OIDC code exchange failed", zap.Error(err))
+		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		return
+	}
+
+	// Extract and verify the ID token.
+	rawID, ok := token.Extra("id_token").(string)
+	if !ok {
+		http.Error(w, "no id_token in response", http.StatusUnauthorized)
+		return
+	}
+	verifier := d.oidcProvider.Verifier(&gooidc.Config{ClientID: d.config.OIDC.ClientID})
+	idToken, err := verifier.Verify(r.Context(), rawID)
+	if err != nil {
+		d.log.Warn("OIDC id_token verification failed", zap.Error(err))
+		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		return
+	}
+
+	// Extract standard claims.
+	var claims struct {
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	_ = idToken.Claims(&claims)
+
+	// Create a session.
+	sessionToken, err := randomToken()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	ttl := d.sessionTTL()
+	d.sessionMu.Lock()
+	d.sessions[sessionToken] = oidcSession{
+		Subject: idToken.Subject,
+		Email:   claims.Email,
+		Name:    claims.Name,
+		Expiry:  time.Now().Add(ttl),
+	}
+	d.sessionMu.Unlock()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieSession,
+		Value:    sessionToken,
+		Path:     "/",
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	d.log.Info("OIDC login", zap.String("subject", idToken.Subject), zap.String("email", claims.Email))
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// oidcLogoutHandler clears the local session and redirects to Keycloak logout.
+func (d *Dashboard) oidcLogoutHandler(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(cookieSession); err == nil {
+		d.sessionMu.Lock()
+		delete(d.sessions, c.Value)
+		d.sessionMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: cookieSession, Path: "/", MaxAge: -1})
+	http.Redirect(w, r, "/auth/login", http.StatusFound)
+}
+
+// oidcSessionMiddleware checks for a valid session cookie; redirects to login otherwise.
+func (d *Dashboard) oidcSessionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(cookieSession)
+		if err != nil {
+			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			return
+		}
+		d.sessionMu.RLock()
+		sess, ok := d.sessions[c.Value]
+		d.sessionMu.RUnlock()
+		if !ok || time.Now().After(sess.Expiry) {
+			// Remove expired entry.
+			if ok {
+				d.sessionMu.Lock()
+				delete(d.sessions, c.Value)
+				d.sessionMu.Unlock()
+			}
+			http.SetCookie(w, &http.Cookie{Name: cookieSession, Path: "/", MaxAge: -1})
+			http.Redirect(w, r, "/auth/login", http.StatusFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (d *Dashboard) basicAuthMiddleware(next http.Handler) http.Handler {
@@ -676,9 +884,18 @@ func (d *Dashboard) sessionAgentConfigsPartial(w http.ResponseWriter, r *http.Re
 	d.render(w, "session_agent_configs_partial", configs)
 }
 
+type agentFindingsData struct {
+	AgentID  string
+	Search   string
+	Status   string
+	Findings []models.SessionFinding
+}
+
 func (d *Dashboard) agentFindingsPartial(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	agentID := vars["agent_id"]
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	statusFilter := r.URL.Query().Get("status")
 
 	findings, err := d.store.GetFindingsForAgent(agentID)
 	if err != nil {
@@ -686,7 +903,60 @@ func (d *Dashboard) agentFindingsPartial(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	d.render(w, "agent_findings_partial", findings)
+	if search != "" || statusFilter != "" {
+		filtered := findings[:0]
+		for _, f := range findings {
+			if statusFilter != "" && f.Status != statusFilter {
+				continue
+			}
+			if search != "" {
+				haystack := strings.ToLower(f.Observable + " " + f.Type + " " + f.Analysis + " " + f.FindingID)
+				if !strings.Contains(haystack, search) {
+					continue
+				}
+			}
+			filtered = append(filtered, f)
+		}
+		findings = filtered
+	}
+
+	d.render(w, "agent_findings_partial", agentFindingsData{
+		AgentID:  agentID,
+		Search:   search,
+		Status:   statusFilter,
+		Findings: findings,
+	})
+}
+
+func (d *Dashboard) updateFindingStatusPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	validStatuses := map[string]bool{"preliminary": true, "valid": true, "invalid": true, "duplicate": true}
+	if !validStatuses[body.Status] {
+		http.Error(w, "invalid status", http.StatusBadRequest)
+		return
+	}
+
+	if err := d.store.UpdateFindingStatusByPK(id, body.Status); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (d *Dashboard) agentReportsPartial(w http.ResponseWriter, r *http.Request) {
@@ -744,6 +1014,102 @@ func (d *Dashboard) sessionMemosPartial(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	d.render(w, "memos_partial", memos)
+}
+
+func (d *Dashboard) deleteSessionPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	sessionID := vars["session_id"]
+
+	if err := d.store.DeleteSession(sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return empty body — htmx outerHTML swap removes the row
+	w.WriteHeader(http.StatusOK)
+}
+
+func (d *Dashboard) getMemoPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	memo, err := d.store.GetMemo(memoID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	d.render(w, "memo_row", memo)
+}
+
+func (d *Dashboard) getMemoEditPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	memo, err := d.store.GetMemo(memoID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	d.render(w, "memo_edit_form", memo)
+}
+
+func (d *Dashboard) updateMemoPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	content := r.FormValue("content")
+	if content == "" {
+		http.Error(w, "content required", http.StatusBadRequest)
+		return
+	}
+
+	if err := d.store.UpdateMemo(memoID, content); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	memo, err := d.store.GetMemo(memoID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	d.render(w, "memo_row", memo)
+}
+
+func (d *Dashboard) deleteMemoPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	memoID := vars["memo_id"]
+
+	if err := d.store.DeleteMemo(memoID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Return empty body — htmx outerHTML swap removes the element
+	w.WriteHeader(http.StatusOK)
 }
 
 func (d *Dashboard) render(w http.ResponseWriter, name string, data any) {

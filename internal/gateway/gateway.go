@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -175,7 +176,10 @@ func (g *Gateway) startDashboard() {
 		listen = ":8080"
 	}
 
-	dash := dashboard.New(g.store, g.log.Named("dashboard"), &g.config.Dashboard, g.config)
+	dash, err := dashboard.New(context.Background(), g.store, g.log.Named("dashboard"), &g.config.Dashboard, g.config)
+	if err != nil {
+		g.log.Fatal("Failed to initialise dashboard", zap.Error(err))
+	}
 	dashRouter := mux.NewRouter()
 	dash.SetupRoutes(dashRouter)
 
@@ -1126,12 +1130,6 @@ func (g *Gateway) getMemosHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := g.store.GetSessionForAgent(agent.ID)
-	if err != nil {
-		http.Error(w, "no active session", http.StatusBadRequest)
-		return
-	}
-
 	q := r.URL.Query()
 	scope := q.Get("scope")
 	host := q.Get("host")
@@ -1149,6 +1147,11 @@ func (g *Gateway) getMemosHandler(w http.ResponseWriter, r *http.Request) {
 	// For agent-scoped memos, filter by session_id
 	sessionFilter := ""
 	if scope == "agent" {
+		session, err := g.store.GetSessionForAgent(agent.ID)
+		if err != nil {
+			http.Error(w, "no active session", http.StatusBadRequest)
+			return
+		}
 		sessionFilter = session.ID
 	}
 
