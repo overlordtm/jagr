@@ -31,8 +31,9 @@ func TestGetAvailableTools(t *testing.T) {
 		"write_memo",
 		"read_memos",
 		"query_knowledge_base",
+		"read_cached_output",
 	}
-	
+
 	if len(tools) != len(expectedTools) {
 		t.Errorf("Expected %d tools, got %d", len(expectedTools), len(tools))
 	}
