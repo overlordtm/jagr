@@ -119,25 +119,14 @@ func (tb *ToolBox) execExecuteTrusted(tc ToolCall, args map[string]any) (ToolRes
 		}
 	}
 
-	// Handle LLM sending full command string (e.g. "cat /etc/passwd") as the command name
-	if len(cmdArgs) == 0 && strings.Contains(command, " ") {
-		parts := strings.Fields(command)
-		command = parts[0]
-		cmdArgs = parts[1:]
-	}
-
-	// If the command contains shell metacharacters (pipes, redirections, etc.),
-	// wrap everything in "sh -c" so the shell interprets them.
+	// Always route through "sh -c" so the shell handles argument splitting,
+	// pipes, redirections, and other syntax the LLM may produce.
 	fullCmd := command
 	if len(cmdArgs) > 0 {
 		fullCmd = command + " " + strings.Join(cmdArgs, " ")
 	}
-	if strings.ContainsAny(fullCmd, "|;&><$`") {
-		cmdArgs = []string{"-c", fullCmd}
-		command = "sh"
-	}
 
-	stdout, stderr, exitCode, err := tb.cleanRoom.ExecuteTrusted(command, cmdArgs)
+	stdout, stderr, exitCode, err := tb.cleanRoom.ExecuteTrusted("sh", []string{"-c", fullCmd})
 	return ToolResult{
 		ToolID:   tc.ID,
 		Name:     tc.Function.Name,
@@ -269,7 +258,9 @@ func (tb *ToolBox) execLinpeasStatic(tc ToolCall, args map[string]any) (ToolResu
 
 func (tb *ToolBox) execPspy(tc ToolCall, args map[string]any) (ToolResult, error) {
 	duration := 300
-	if d, ok := args["duration_seconds"].(int); ok {
+	if d, ok := args["duration_seconds"].(float64); ok {
+		duration = int(d)
+	} else if d, ok := args["duration_seconds"].(int); ok {
 		duration = d
 	}
 

@@ -125,8 +125,8 @@ func (s *RollingWindowStrategy) Select(history []Message) []Message {
 			// Insert the summary system message in place of the first
 			// compressed message to preserve conversation order.
 			result = append(result, Message{
-				Role:    "system",
-				Content: "Prior conversation history was summarized locally. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
+				Role:    "user",
+				Content: "[System Note] Prior conversation history was summarized locally. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
 			})
 			compressed = true
 		}
@@ -204,8 +204,8 @@ func (s *RollingWindowStrategy) Compact(history []Message) ([]Message, error) {
 			result = append(result, msg)
 		} else if !compressed {
 			result = append(result, Message{
-				Role:    "system",
-				Content: "Prior conversation history was summarized to save context. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
+				Role:    "user",
+				Content: "[System Note] Prior conversation history was summarized to save context. Summary:\n\n" + summary + "\n\nNote: You may have written memos. Use read_memos(scope=\"agent\") to recall detailed findings.",
 			})
 			compressed = true
 		}

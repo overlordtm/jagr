@@ -93,6 +93,10 @@ func (a *AiAgent) Run() error {
 			if err := a.llmContext.Compact(); err != nil {
 				a.harness.logger.Warn("Context compaction failed", zap.Error(err))
 			}
+
+			// Inject a progress checkpoint after compaction so the agent
+			// knows what it has already done and how much budget remains.
+			a.injectProgressCheckpoint(iterLimit)
 		}
 
 		a.harness.logger.Info("AiAgent Thinking", zap.String("name", a.name), zap.Int("iteration", a.iterations+1))
@@ -151,6 +155,36 @@ func (a *AiAgent) Run() error {
 		a.harness.logger.Error("Failed to log agent conclude event", zap.Error(err))
 	}
 	return nil
+}
+
+// injectProgressCheckpoint appends a system message after context compaction
+// so the agent always knows its iteration budget and what findings it has
+// already submitted. This prevents the amnesia loop where the agent
+// re-investigates artifacts it already analyzed before compaction.
+func (a *AiAgent) injectProgressCheckpoint(iterLimit int) {
+	remaining := iterLimit - a.iterations
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Progress Checkpoint\n")
+	fmt.Fprintf(&b, "- Iteration %d of %d (%d remaining). If remaining <= 3, submit findings NOW and call conclude.\n", a.iterations, iterLimit, remaining)
+
+	submitted := a.findingsStore.GetByAgent(a.name)
+	if len(submitted) > 0 {
+		b.WriteString("- Findings already submitted (do NOT re-investigate these):\n")
+		for _, f := range submitted {
+			fmt.Fprintf(&b, "  - [%s] %s: %s\n", f.Severity, f.Observable, f.Type)
+		}
+	} else {
+		b.WriteString("- No findings submitted yet. Gather IOCs and submit a finding soon.\n")
+	}
+
+	if len(a.delegatedTargets) > 0 {
+		b.WriteString("- Targets already delegated (do NOT re-delegate):\n")
+		for t := range a.delegatedTargets {
+			fmt.Fprintf(&b, "  - %s\n", t)
+		}
+	}
+
+	a.llmContext.Append(Message{Role: "user", Content: "[System Note]\n" + b.String()})
 }
 
 func (a *AiAgent) gatherPartialEvidence() []string {
