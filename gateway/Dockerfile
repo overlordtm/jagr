@@ -1,6 +1,6 @@
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-RUN apk --no-cache add ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY dist/jagr-gateway-linux-amd64 /usr/local/bin/jagr-gateway
 
