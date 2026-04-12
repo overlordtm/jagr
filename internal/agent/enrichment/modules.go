@@ -59,8 +59,6 @@ func EnrichModules(runner Runner) string {
 				pkg := getPackageOwner(runner, modPath)
 				if pkg != "" {
 					b.WriteString(fmt.Sprintf("   Package: %s\n", pkg))
-				} else {
-					b.WriteString("   Package: NOT from any installed package\n")
 				}
 			} else {
 				b.WriteString("   On-disk: NOT FOUND in /lib/modules\n")

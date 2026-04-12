@@ -38,8 +38,6 @@ func EnrichSystemd(runner Runner) string {
 				b.WriteString(" (exists")
 				if e.BinaryPkg != "" {
 					b.WriteString(fmt.Sprintf(", pkg: %s", e.BinaryPkg))
-				} else {
-					b.WriteString(", NOT from any installed package")
 				}
 				if e.BinaryType != "" {
 					b.WriteString(fmt.Sprintf(", type: %s", e.BinaryType))
@@ -183,17 +181,9 @@ func enrichBinary(runner Runner, entry *systemdEntry) {
 		return
 	}
 
-	stdout, _, exitCode, _ := runner.ExecuteTrusted("dpkg", []string{"-S", bp})
-	if exitCode == 0 && stdout != "" {
-		entry.BinaryPkg = strings.TrimSpace(strings.SplitN(stdout, "\n", 2)[0])
-	} else {
-		stdout, _, exitCode, _ = runner.ExecuteTrusted("rpm", []string{"-qf", bp})
-		if exitCode == 0 && stdout != "" {
-			entry.BinaryPkg = strings.TrimSpace(stdout)
-		}
-	}
+	entry.BinaryPkg = getPackageOwner(runner, bp)
 
-	stdout, _, _, _ = runner.ExecuteTrusted("file", []string{"-b", bp})
+	stdout, _, _, _ := runner.ExecuteTrusted("file", []string{"-b", bp})
 	entry.BinaryType = strings.TrimSpace(stdout)
 }
 

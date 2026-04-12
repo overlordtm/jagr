@@ -359,6 +359,7 @@ func (d *Dashboard) SetupRoutes(router *mux.Router) {
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/report", wrap(d.sessionReportPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/agent-configs", wrap(d.sessionAgentConfigsPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/findings", wrap(d.agentFindingsPartial)).Methods("GET")
+	router.Handle("/partials/findings/{id}/status", wrap(d.updateFindingStatusPartial)).Methods("PATCH")
 	router.Handle("/partials/agents/{agent_id}/reports", wrap(d.agentReportsPartial)).Methods("GET")
 	router.Handle("/partials/memos", wrap(d.allMemosPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/memos", wrap(d.agentMemosPartial)).Methods("GET")
@@ -676,9 +677,18 @@ func (d *Dashboard) sessionAgentConfigsPartial(w http.ResponseWriter, r *http.Re
 	d.render(w, "session_agent_configs_partial", configs)
 }
 
+type agentFindingsData struct {
+	AgentID  string
+	Search   string
+	Status   string
+	Findings []models.SessionFinding
+}
+
 func (d *Dashboard) agentFindingsPartial(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	agentID := vars["agent_id"]
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
+	statusFilter := r.URL.Query().Get("status")
 
 	findings, err := d.store.GetFindingsForAgent(agentID)
 	if err != nil {
@@ -686,7 +696,60 @@ func (d *Dashboard) agentFindingsPartial(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	d.render(w, "agent_findings_partial", findings)
+	if search != "" || statusFilter != "" {
+		filtered := findings[:0]
+		for _, f := range findings {
+			if statusFilter != "" && f.Status != statusFilter {
+				continue
+			}
+			if search != "" {
+				haystack := strings.ToLower(f.Observable + " " + f.Type + " " + f.Analysis + " " + f.FindingID)
+				if !strings.Contains(haystack, search) {
+					continue
+				}
+			}
+			filtered = append(filtered, f)
+		}
+		findings = filtered
+	}
+
+	d.render(w, "agent_findings_partial", agentFindingsData{
+		AgentID:  agentID,
+		Search:   search,
+		Status:   statusFilter,
+		Findings: findings,
+	})
+}
+
+func (d *Dashboard) updateFindingStatusPartial(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	idStr := vars["id"]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	validStatuses := map[string]bool{"preliminary": true, "valid": true, "invalid": true, "duplicate": true}
+	if !validStatuses[body.Status] {
+		http.Error(w, "invalid status", http.StatusBadRequest)
+		return
+	}
+
+	if err := d.store.UpdateFindingStatusByPK(id, body.Status); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (d *Dashboard) agentReportsPartial(w http.ResponseWriter, r *http.Request) {

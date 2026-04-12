@@ -414,10 +414,12 @@ func (a *AiAgent) executeTool(tc ToolCall) (ToolResult, error) {
 		if err != nil {
 			return ToolResult{}, fmt.Errorf("failed to parse args: %w", err)
 		}
-		findingBytes, _ := json.Marshal(args["finding"])
-		var finding Finding
-		if err := json.Unmarshal(findingBytes, &finding); err != nil {
-			return ToolResult{}, err
+		finding := Finding{
+			Type:       stringArg(args, "type"),
+			Severity:   stringArg(args, "severity"),
+			Observable: stringArg(args, "observable"),
+			Analysis:   stringArg(args, "analysis"),
+			Evidence:   stringSliceArg(args, "evidence"),
 		}
 
 		stored, isDuplicate := a.findingsStore.Add(finding, a.name)
@@ -561,9 +563,19 @@ func (a *AiAgent) executeWriteMemo(tc ToolCall) (ToolResult, error) {
 		memoType = "observation"
 	}
 
+	// Force memo_type for system_overview agents so the harness can find it later.
+	if a.role == "system_overview" {
+		memoType = "system_overview"
+	}
+
 	resp, err := a.gateway.WriteMemo(scope, content, memoType, a.gateway.Hostname(), a.name)
 	if err != nil {
 		return ToolResult{}, err
+	}
+
+	// Auto-conclude system_overview agents after a successful write — their job is done.
+	if a.role == "system_overview" {
+		a.concluded = true
 	}
 
 	return ToolResult{

@@ -599,6 +599,11 @@ func (s *Store) UpdateFindingStatus(sessionID, findingID, status string) error {
 	return err
 }
 
+func (s *Store) UpdateFindingStatusByPK(id int, status string) error {
+	_, err := s.db.Exec(`UPDATE session_findings SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
 func (s *Store) GetSessionFindings(sessionID string) ([]models.SessionFinding, error) {
 	rows, err := s.db.Query(`
 		SELECT id, session_id, finding_id, type, severity, observable, analysis, evidence, status, created_at

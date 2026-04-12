@@ -202,16 +202,34 @@ func GetAvailableTools() []Tool {
 		},
 		{
 			Name:        "submit_finding",
-			Description: "Register a confirmed security finding to the agent's report. Include severity, type, observable, and analysis.",
+			Description: "Register a confirmed security finding. Call once per distinct finding.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"finding": map[string]any{
-						"type":        "object",
-						"description": "Finding object with type, severity, observable, and analysis",
+					"type": map[string]any{
+						"type":        "string",
+						"description": "Finding category (e.g. backdoor, persistence, privesc, credential_exposure, c2, rootkit, misconfiguration)",
+					},
+					"severity": map[string]any{
+						"type":        "string",
+						"enum":        []string{"critical", "high", "medium", "low", "info"},
+						"description": "Impact severity",
+					},
+					"observable": map[string]any{
+						"type":        "string",
+						"description": "The specific artifact: file path, process name, cron entry, network endpoint, etc.",
+					},
+					"analysis": map[string]any{
+						"type":        "string",
+						"description": "What you found and why it is a security issue. Include MITRE ATT&CK technique ID if applicable.",
+					},
+					"evidence": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Supporting evidence: relevant command output snippets, file contents, timestamps.",
 					},
 				},
-				"required": []string{"finding"},
+				"required": []string{"type", "severity", "observable", "analysis"},
 			},
 		},
 		{
@@ -299,7 +317,7 @@ func GetAvailableTools() []Tool {
 					},
 					"memo_type": map[string]any{
 						"type":        "string",
-						"enum":        []string{"observation", "finding_lead", "correlation"},
+						"enum":        []string{"observation", "finding_lead", "correlation", "system_overview"},
 						"description": "Type of memo (default: observation)",
 						"default":     "observation",
 					},
@@ -429,6 +447,27 @@ func ParseToolArguments(args string) (map[string]any, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// stringArg extracts a string value from parsed tool arguments.
+func stringArg(args map[string]any, key string) string {
+	v, _ := args[key].(string)
+	return v
+}
+
+// stringSliceArg extracts a []string from parsed tool arguments.
+func stringSliceArg(args map[string]any, key string) []string {
+	raw, ok := args[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // FormatToolOutput formats tool output for the LLM, applying filters and truncation

@@ -11,6 +11,7 @@
         "**/node_modules": true,
         "**/bower_components": true,
         "**/*.code-search": true,
-        "internal/agent/tools": true
+        "internal/agent/tools": true,
+        "external/": true,
     }
 }

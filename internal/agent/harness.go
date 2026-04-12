@@ -99,11 +99,13 @@ func (h *JagrHarness) Run() error {
 		}
 
 		var objBuilder strings.Builder
-		objBuilder.WriteString("## Target Host Context\n\n")
-		objBuilder.WriteString(hostContext)
+
 		if systemOverview != "" {
 			objBuilder.WriteString("\n\n## System Overview\n\n")
 			objBuilder.WriteString(systemOverview)
+		} else {
+			objBuilder.WriteString("## Target Host Context\n\n")
+			objBuilder.WriteString(hostContext)
 		}
 		objBuilder.WriteString("\n\nBegin your investigation phase.")
 		objective := objBuilder.String()
@@ -183,6 +185,7 @@ func (h *JagrHarness) runSystemOverview(hostContext string) string {
 	}
 	objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nDetermine the purpose of this system and identify all network-exposed services. Write your findings as a memo with type 'system_overview'.", hostContext)
 	agent := NewAiAgent(h, "system_overview", "system_overview", prompt, objective, GetToolsForRole("system_overview"))
+	agent.maxIter = 10
 	if err := agent.Run(); err != nil {
 		h.logger.Error("system_overview agent failed", zap.Error(err))
 		return ""
@@ -241,7 +244,7 @@ func (h *JagrHarness) collectHostContext() string {
 	if out, _, _, err := h.cleanRoom.ExecuteTrusted("ip", []string{"r"}); err == nil && out != "" {
 		sections = append(sections, "### Routes\n"+strings.TrimSpace(out))
 	}
-	if out, _, _, err := h.cleanRoom.ExecuteTrusted("ss", []string{"-tuln"}); err == nil && out != "" {
+	if out, _, _, err := h.cleanRoom.ExecuteTrusted("netstat", []string{"-tuln"}); err == nil && out != "" {
 		sections = append(sections, "### Listening Ports\n"+strings.TrimSpace(out))
 	}
 	if out, _, _, err := h.cleanRoom.ExecuteTrusted("who", nil); err == nil && out != "" {

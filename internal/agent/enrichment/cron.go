@@ -146,16 +146,7 @@ func enrichCronEntry(runner Runner, entry *CronEntry) {
 		return
 	}
 
-	// Package ownership (try dpkg first, then rpm)
-	stdout, _, exitCode, _ = runner.ExecuteTrusted("dpkg", []string{"-S", entry.BinaryPath})
-	if exitCode == 0 && stdout != "" {
-		entry.BinaryPkg = strings.TrimSpace(strings.SplitN(stdout, "\n", 2)[0])
-	} else {
-		stdout, _, exitCode, _ = runner.ExecuteTrusted("rpm", []string{"-qf", entry.BinaryPath})
-		if exitCode == 0 && stdout != "" {
-			entry.BinaryPkg = strings.TrimSpace(stdout)
-		}
-	}
+	entry.BinaryPkg = getPackageOwner(runner, entry.BinaryPath)
 
 	// File type
 	stdout, _, _, _ = runner.ExecuteTrusted("file", []string{"-b", entry.BinaryPath})
@@ -200,8 +191,6 @@ func formatCronEntries(entries []CronEntry) string {
 				b.WriteString(" (exists")
 				if e.BinaryPkg != "" {
 					b.WriteString(fmt.Sprintf(", pkg: %s", e.BinaryPkg))
-				} else {
-					b.WriteString(", NOT from any installed package")
 				}
 				if e.BinaryType != "" {
 					b.WriteString(fmt.Sprintf(", type: %s", e.BinaryType))

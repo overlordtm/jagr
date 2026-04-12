@@ -357,7 +357,7 @@ func (tb *ToolBox) execGetNetworkInfo(tc ToolCall, args map[string]any) (ToolRes
 	results = append(results, "\n=== Routes ===")
 	results = append(results, strings.Split(stdout, "\n")...)
 
-	stdout, _, _, _ = tb.cleanRoom.ExecuteTrusted("ss", []string{"-tuln"})
+	stdout, _, _, _ = tb.cleanRoom.ExecuteTrusted("netstat", []string{"-tuln"})
 	results = append(results, "\n=== Connections ===")
 	results = append(results, strings.Split(stdout, "\n")...)
 

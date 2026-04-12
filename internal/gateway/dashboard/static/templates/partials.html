@@ -402,7 +402,7 @@
 {{end}}
 
 {{define "agent_findings_partial"}}
-{{if .}}
+{{if .Findings}}
 <table class="min-w-full">
     <thead>
         <tr class="border-b border-gray-800">
@@ -416,7 +416,8 @@
         </tr>
     </thead>
     <tbody>
-        {{range .}}
+        {{$agentID := .AgentID}}
+        {{range .Findings}}
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/50 transition-colors">
             <td class="px-5 py-4 text-sm font-mono text-gray-300">{{.FindingID}}</td>
             <td class="px-5 py-4">
@@ -425,7 +426,14 @@
             <td class="px-5 py-4 text-sm text-gray-300">{{.Type}}</td>
             <td class="px-5 py-4 text-sm text-gray-300">{{truncate .Observable 60}}</td>
             <td class="px-5 py-4">
-                <span class="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold {{statusColor .Status}}">{{.Status}}</span>
+                <select class="finding-status-select bg-gray-800 text-xs font-medium rounded-lg px-2 py-1 border border-gray-700 focus:outline-none focus:border-gray-600 {{statusColor .Status}}"
+                        data-finding-id="{{.ID}}"
+                        onchange="updateFindingStatus(this.dataset.findingId, this.value, this)">
+                    <option value="preliminary" {{if eq .Status "preliminary"}}selected{{end}}>preliminary</option>
+                    <option value="valid"       {{if eq .Status "valid"}}selected{{end}}>valid</option>
+                    <option value="invalid"     {{if eq .Status "invalid"}}selected{{end}}>invalid</option>
+                    <option value="duplicate"   {{if eq .Status "duplicate"}}selected{{end}}>duplicate</option>
+                </select>
             </td>
             <td class="px-5 py-4">
                 <span class="font-mono text-xs text-gray-500">{{shortID .SessionID}}</span>
@@ -454,7 +462,7 @@
 </table>
 {{else}}
 <div class="p-12 text-center">
-    <p class="text-gray-600">No findings recorded for this host.</p>
+    <p class="text-gray-600">No findings match the current filters.</p>
 </div>
 {{end}}
 {{end}}

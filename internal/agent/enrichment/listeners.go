@@ -5,18 +5,18 @@ import (
 	"strings"
 )
 
-// EnrichListeners parses ss output for TCP/UDP listeners and enriches each
+// EnrichListeners parses netstat output for TCP/UDP listeners and enriches each
 // with process binary metadata and deleted-binary detection.
 func EnrichListeners(runner Runner) string {
 	var b strings.Builder
 
 	// TCP listeners
-	tcpOut, _, _, _ := runner.ExecuteTrusted("ss", []string{"-tlnp"})
-	tcpEntries := parseSSOutput(tcpOut)
+	tcpOut, _, _, _ := runner.ExecuteTrusted("netstat", []string{"-tlnp"})
+	tcpEntries := parseNetstatOutput(tcpOut, "TCP")
 
 	// UDP listeners
-	udpOut, _, _, _ := runner.ExecuteTrusted("ss", []string{"-ulnp"})
-	udpEntries := parseSSOutput(udpOut)
+	udpOut, _, _, _ := runner.ExecuteTrusted("netstat", []string{"-ulnp"})
+	udpEntries := parseNetstatOutput(udpOut, "UDP")
 
 	allEntries := append(tcpEntries, udpEntries...)
 
@@ -50,8 +50,6 @@ func EnrichListeners(runner Runner) string {
 						pkg := getPackageOwner(runner, binPath)
 						if pkg != "" {
 							b.WriteString(fmt.Sprintf(" (pkg: %s)", pkg))
-						} else {
-							b.WriteString(" (NOT from any installed package)")
 						}
 					}
 				}
@@ -81,11 +79,11 @@ type ssEntry struct {
 	PID       string
 }
 
-func parseSSOutput(output string) []ssEntry {
+// parseNetstatOutput parses `netstat -tlnp` / `-ulnp` output.
+// Format: Proto Recv-Q Send-Q Local Foreign [State] PID/Program
+func parseNetstatOutput(output, proto string) []ssEntry {
 	var entries []ssEntry
-	lines := strings.Split(output, "\n")
-
-	for _, line := range lines[1:] { // skip header
+	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -96,24 +94,29 @@ func parseSSOutput(output string) []ssEntry {
 			continue
 		}
 
-		// ss -tlnp format: State Recv-Q Send-Q Local:Port Peer:Port Process
+		// Skip header lines
+		p := strings.ToLower(fields[0])
+		if p != "tcp" && p != "tcp6" && p != "udp" && p != "udp6" {
+			continue
+		}
+
+		// netstat -tlnp:  Proto Recv-Q Send-Q Local Foreign State PID/Program
+		// netstat -ulnp:  Proto Recv-Q Send-Q Local Foreign       PID/Program  (no State col for UDP)
 		entry := ssEntry{
+			Proto:     proto,
 			LocalAddr: fields[3],
 			PeerAddr:  fields[4],
 		}
 
-		// Determine protocol from header context
-		if strings.Contains(output, "tcp") {
-			entry.Proto = "TCP"
-		} else {
-			entry.Proto = "UDP"
-		}
-
-		// Parse process info from the last field if present
-		// Format: users:(("process",pid=1234,fd=5))
+		// Find the PID/Program field — it looks like "1234/progname" or "-"
 		for _, f := range fields[5:] {
-			if strings.Contains(f, "pid=") {
-				entry.Process, entry.PID = parseProcessField(f)
+			if strings.Contains(f, "/") {
+				parts := strings.SplitN(f, "/", 2)
+				if len(parts) == 2 && parts[0] != "-" {
+					entry.PID = parts[0]
+					entry.Process = parts[1]
+				}
+				break
 			}
 		}
 
@@ -121,27 +124,4 @@ func parseSSOutput(output string) []ssEntry {
 	}
 
 	return entries
-}
-
-func parseProcessField(field string) (string, string) {
-	var process, pid string
-
-	// Extract process name from (("name",pid=N,fd=N))
-	if idx := strings.Index(field, "((\""); idx >= 0 {
-		rest := field[idx+3:]
-		if end := strings.Index(rest, "\""); end >= 0 {
-			process = rest[:end]
-		}
-	}
-
-	if idx := strings.Index(field, "pid="); idx >= 0 {
-		rest := field[idx+4:]
-		if end := strings.IndexAny(rest, ",)"); end >= 0 {
-			pid = rest[:end]
-		} else {
-			pid = rest
-		}
-	}
-
-	return process, pid
 }

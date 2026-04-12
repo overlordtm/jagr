@@ -154,8 +154,22 @@
 <!-- All Findings Tab -->
 <div id="agent-tab-all-findings" class="agent-tab-content hidden">
 <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-    <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-base font-semibold text-white">All Findings</h2>
+    <div class="px-5 py-4 border-b border-gray-800 flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-base font-semibold text-white shrink-0">All Findings</h2>
+        <div class="flex items-center gap-2">
+            <input id="findings-search" type="text" placeholder="Search…"
+                   class="bg-gray-800 text-xs text-white rounded-lg px-2.5 py-1.5 border border-gray-700 focus:outline-none focus:border-gray-600 w-44"
+                   oninput="refreshFindings()">
+            <select id="findings-status-filter"
+                    class="bg-gray-800 text-xs font-medium text-white rounded-lg px-2.5 py-1.5 border border-gray-700 focus:outline-none focus:border-gray-600"
+                    onchange="refreshFindings()">
+                <option value="">All Status</option>
+                <option value="preliminary">Preliminary</option>
+                <option value="valid">Valid</option>
+                <option value="invalid">Invalid</option>
+                <option value="duplicate">Duplicate</option>
+            </select>
+        </div>
     </div>
     <div id="agent-findings-list"
          hx-get="/partials/agents/{{.Agent.ID}}/findings"
@@ -197,6 +211,34 @@
 </div>
 
 <script>
+const _agentID = '{{.Agent.ID}}';
+
+function refreshFindings() {
+    const search = document.getElementById('findings-search').value.trim();
+    const status = document.getElementById('findings-status-filter').value;
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (status) params.set('status', status);
+    const url = '/partials/agents/' + _agentID + '/findings' + (params.toString() ? '?' + params.toString() : '');
+    htmx.ajax('GET', url, {target: '#agent-findings-list', swap: 'innerHTML'});
+}
+
+function updateFindingStatus(id, status, selectEl) {
+    selectEl.disabled = true;
+    fetch('/partials/findings/' + id + '/status', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({status: status}),
+    }).then(r => {
+        selectEl.disabled = false;
+        if (!r.ok) { alert('Failed to update status'); return; }
+        refreshFindings();
+    }).catch(() => {
+        selectEl.disabled = false;
+        alert('Failed to update status');
+    });
+}
+
 function switchAgentTab(btn, tab) {
     document.querySelectorAll('.agent-tab-content').forEach(el => el.classList.add('hidden'));
     document.querySelectorAll('.agent-tab').forEach(el => {
@@ -206,7 +248,15 @@ function switchAgentTab(btn, tab) {
     document.getElementById('agent-tab-' + tab).classList.remove('hidden');
     btn.classList.remove('text-gray-400');
     btn.classList.add('bg-gray-700', 'text-white');
+    history.replaceState(null, '', '#' + tab);
 }
+(function() {
+    const hash = location.hash.slice(1);
+    if (hash) {
+        const btn = document.querySelector('.agent-tab[data-tab="' + hash + '"]');
+        if (btn) switchAgentTab(btn, hash);
+    }
+})();
 </script>
 {{end}}
 
@@ -366,6 +416,14 @@ function switchSessionTab(btn, tab) {
     document.getElementById('tab-' + tab).classList.remove('hidden');
     btn.classList.remove('text-gray-400');
     btn.classList.add('bg-gray-700', 'text-white');
+    history.replaceState(null, '', '#' + tab);
 }
+(function() {
+    const hash = location.hash.slice(1);
+    if (hash) {
+        const btn = document.querySelector('.session-tab[data-tab="' + hash + '"]');
+        if (btn) switchSessionTab(btn, hash);
+    }
+})();
 </script>
 {{end}}
