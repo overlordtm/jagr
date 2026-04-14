@@ -132,10 +132,13 @@ func enrichCronEntry(runner Runner, entry *CronEntry) {
 		return
 	}
 
-	// Resolve via which
+	// Resolve via which, but ignore results pointing to the agent's own temp directory
 	stdout, _, exitCode, _ := runner.ExecuteTrusted("which", []string{entry.BinaryPath})
 	if exitCode == 0 && strings.TrimSpace(stdout) != "" {
-		entry.BinaryPath = strings.TrimSpace(stdout)
+		resolved := strings.TrimSpace(stdout)
+		if !isAgentTempPath(resolved) {
+			entry.BinaryPath = resolved
+		}
 	}
 
 	// Check existence
@@ -304,6 +307,14 @@ func getShellUsers(runner Runner) []string {
 		users = append(users, fields[0])
 	}
 	return users
+}
+
+// isAgentTempPath returns true if the path belongs to the agent's own temporary
+// work directory. The agent always names its work dir with a ".jagr_" prefix
+// (see cleanroom.go), so this check prevents busybox symlinks from being
+// reported as the binary for cron entries that use shell built-ins like "test".
+func isAgentTempPath(path string) bool {
+	return strings.Contains(path, "jagr")
 }
 
 func getFileMtime(runner Runner, path string) string {
