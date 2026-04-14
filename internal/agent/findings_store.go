@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -104,6 +105,44 @@ func (fs *FindingsStore) GetByAgent(agentName string) []Finding {
 	var result []Finding
 	for _, f := range fs.findings {
 		if f.AgentName == agentName {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+// FilterSelfArtifacts marks any finding whose Observable falls under workDir
+// as invalid, preventing jagr's own tools from being reported as malicious.
+// Returns status updates suitable for sending to the gateway.
+func (fs *FindingsStore) FilterSelfArtifacts(workDir string) []StatusUpdate {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if !strings.HasSuffix(workDir, "/") {
+		workDir += "/"
+	}
+	dir := strings.TrimSuffix(workDir, "/")
+
+	var updates []StatusUpdate
+	for i := range fs.findings {
+		f := &fs.findings[i]
+		if strings.HasPrefix(f.Observable, workDir) || f.Observable == dir {
+			f.Status = "invalid"
+			updates = append(updates, StatusUpdate{FindingID: f.ID, Status: "invalid"})
+		}
+	}
+	return updates
+}
+
+// GetReportable returns findings that are not marked invalid, for use by the
+// reporter agent so jagr's own artifacts are excluded from the narrative.
+func (fs *FindingsStore) GetReportable() []Finding {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	var result []Finding
+	for _, f := range fs.findings {
+		if f.Status != "invalid" {
 			result = append(result, f)
 		}
 	}

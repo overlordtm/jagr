@@ -131,9 +131,16 @@ func (h *JagrHarness) Run() error {
 		return fatalErr
 	}
 
-	// Reporter Agent
+	// Validate and filter findings before the reporter sees them.
+	// This ensures jagr's own artifacts (busybox symlinks, workdir paths) are
+	// marked invalid and excluded from the report narrative.
+	validateUpdates := h.findingsStore.Validate()
+	selfUpdates := h.findingsStore.FilterSelfArtifacts(h.cleanRoom.WorkDir)
+	h.gateway.UpdateFindingStatuses(append(validateUpdates, selfUpdates...))
+
+	// Reporter Agent — receives only reportable (non-invalid) findings
 	h.logger.Info("Starting Reporter Agent")
-	findings := h.findingsStore.GetAll()
+	findings := h.findingsStore.GetReportable()
 	findingsJson, _ := json.MarshalIndent(findings, "", "  ")
 	reportPath := filepath.Join(h.outputDir, "report.md")
 	reporterObjective := fmt.Sprintf("Synthesize these findings into a detailed markdown report.\nWrite the final report to exactly this path: %s\n\nFindings:\n%s", reportPath, string(findingsJson))
@@ -144,10 +151,6 @@ func (h *JagrHarness) Run() error {
 	}
 
 	h.generateReports("Multi-agent architecture concluded")
-
-	// Validate findings and update statuses at gateway
-	updates := h.findingsStore.Validate()
-	h.gateway.UpdateFindingStatuses(updates)
 
 	// Submit report to gateway
 	h.submitReportToGateway(reportPath)
