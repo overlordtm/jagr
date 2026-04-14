@@ -185,7 +185,11 @@ func (h *JagrHarness) runSystemOverview(hostContext string) string {
 	}
 	objective := fmt.Sprintf("## Target Host Context\n\n%s\n\nDetermine the purpose of this system and identify all network-exposed services. Write your findings as a memo with type 'system_overview'.", hostContext)
 	agent := NewAiAgent(h, "system_overview", "system_overview", prompt, objective, GetToolsForRole("system_overview"))
-	agent.maxIter = 10
+	if profile, ok := h.gateway.GetProfile("system_overview"); !ok || profile.MaxIterations == 0 {
+		if h.gateway.GetDefaultMaxIter() == 0 {
+			agent.maxIter = 10
+		}
+	}
 	if err := agent.Run(); err != nil {
 		h.logger.Error("system_overview agent failed", zap.Error(err))
 		return ""
