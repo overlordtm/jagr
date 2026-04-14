@@ -121,9 +121,15 @@ func (tb *ToolBox) execExecuteTrusted(tc ToolCall, args map[string]any) (ToolRes
 
 	// Always route through "sh -c" so the shell handles argument splitting,
 	// pipes, redirections, and other syntax the LLM may produce.
+	// Individual args are single-quoted to prevent glob expansion, word
+	// splitting, and variable substitution (e.g. /proc/* must not expand).
 	fullCmd := command
 	if len(cmdArgs) > 0 {
-		fullCmd = command + " " + strings.Join(cmdArgs, " ")
+		quoted := make([]string, len(cmdArgs))
+		for i, a := range cmdArgs {
+			quoted[i] = "'" + strings.ReplaceAll(a, "'", "'\\''") + "'"
+		}
+		fullCmd = command + " " + strings.Join(quoted, " ")
 	}
 
 	stdout, stderr, exitCode, err := tb.cleanRoom.ExecuteTrusted("sh", []string{"-c", fullCmd})
