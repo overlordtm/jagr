@@ -86,7 +86,21 @@ func (a *AiAgent) Run() error {
 			iterLimit = a.harness.maxIter
 		}
 	}
+
+	// Append iteration budget to the system prompt so the agent knows from the start.
+	a.llmContext.Append(Message{Role: "system", Content: fmt.Sprintf(
+		"## Iteration Budget\nYou have a maximum of %d iterations. Use them efficiently. When %d or fewer remain, stop investigating and submit your findings with `conclude`.",
+		iterLimit, 3,
+	)})
+
+	budgetWarnInjected := false
 	for a.iterations < iterLimit {
+		// Inject an urgent warning 3 iterations before the limit (once only).
+		if !budgetWarnInjected && iterLimit-a.iterations == 3 {
+			a.injectProgressCheckpoint(iterLimit)
+			budgetWarnInjected = true
+		}
+
 		// Run batch context compression every 5 iterations if history is large
 		if a.iterations > 0 && a.iterations%5 == 0 && len(a.llmContext.RawHistory()) > 20 {
 			a.harness.logger.Info("Compacting agent context", zap.String("name", a.name))

@@ -154,7 +154,7 @@ func main() {
 	flags.StringVar(&gatewayURL, "gateway-url", "", "Gateway server URL (required) (env: JAGR_GATEWAY_URL)")
 	flags.StringVar(&apiKey, "api-key", "", "API key for gateway auth (env: JAGR_API_KEY)")
 	flags.StringVar(&mode, "mode", "interactive", "Execution mode: batch | interactive (env: JAGR_MODE)")
-	flags.IntVar(&maxIterations, "max-iterations", 50, "Maximum ReAct loop iterations (env: JAGR_MAX_ITERATIONS)")
+	flags.IntVar(&maxIterations, "max-iterations", 100, "Maximum ReAct loop iterations (env: JAGR_MAX_ITERATIONS)")
 	flags.IntVar(&maxToolFailures, "max-tool-failures", 5, "Max consecutive failures per tool before circuit breaker trips (env: JAGR_MAX_TOOL_FAILURES)")
 	flags.StringVar(&model, "model", "default", "Model alias to request from gateway (env: JAGR_MODEL)")
 	flags.StringVar(&objective, "objective", "", "Custom objective prompt (env: JAGR_OBJECTIVE)")

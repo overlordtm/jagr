@@ -208,7 +208,7 @@ func (gc *GatewayClient) ChatCompletion(reqBytes []byte, role, name string) (map
 func (gc *GatewayClient) FetchProfiles() {
 	req, err := http.NewRequest("GET", gc.gatewayURL+"/v1/agent/config", nil)
 	if err != nil {
-		gc.logger.Debug("Failed to create profile fetch request", zap.Error(err))
+		gc.logger.Warn("Failed to create profile fetch request", zap.Error(err))
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+gc.apiKey)
@@ -216,10 +216,16 @@ func (gc *GatewayClient) FetchProfiles() {
 
 	resp, err := gc.httpClient.Do(req)
 	if err != nil {
-		gc.logger.Debug("Failed to fetch agent profiles", zap.Error(err))
+		gc.logger.Warn("Failed to fetch agent profiles — agents will use CLI default max iterations", zap.Error(err))
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		gc.logger.Warn("Gateway returned non-OK status for agent config — agents will use CLI default max iterations",
+			zap.Int("status", resp.StatusCode))
+		return
+	}
 
 	var configResp struct {
 		Agents               map[string]AgentProfile `json:"agents"`
@@ -237,7 +243,7 @@ func (gc *GatewayClient) FetchProfiles() {
 		gc.mu.Unlock()
 		gc.logger.Info("Loaded agent profiles from gateway", zap.Int("count", count), zap.Int("default_max_iterations", configResp.DefaultMaxIterations))
 	} else {
-		gc.logger.Debug("Failed to decode agent profiles", zap.Error(err))
+		gc.logger.Warn("Failed to decode agent profiles — agents will use CLI default max iterations", zap.Error(err))
 	}
 }
 
