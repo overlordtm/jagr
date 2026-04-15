@@ -603,19 +603,14 @@ func (gc *GatewayClient) ReadMemos(scope, host, since, memoType string, limit in
 	return b.String(), nil
 }
 
-// QueryKnowledgeBase performs a semantic search against the gateway's knowledge store.
-func (gc *GatewayClient) QueryKnowledgeBase(query, collection string, topK int) (string, error) {
-	if collection == "" {
-		collection = "default"
-	}
-	if topK <= 0 {
-		topK = 5
-	}
-
+// QueryKnowledgeBase queries the LightRAG knowledge base via the gateway.
+func (gc *GatewayClient) QueryKnowledgeBase(query, _ string, topK int) (string, error) {
 	payload := map[string]any{
-		"query":      query,
-		"collection": collection,
-		"top_k":      topK,
+		"query":              query,
+		"include_references": true,
+	}
+	if topK > 0 {
+		payload["top_k"] = topK
 	}
 	body, _ := json.Marshal(payload)
 
@@ -638,35 +633,24 @@ func (gc *GatewayClient) QueryKnowledgeBase(query, collection string, topK int) 
 		return "", fmt.Errorf("KB query failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	// Parse and format for LLM readability
 	var result struct {
-		Results []struct {
-			ID         string            `json:"id"`
-			Content    string            `json:"content"`
-			Metadata   map[string]string `json:"metadata,omitempty"`
-			Similarity float32           `json:"similarity"`
-		} `json:"results"`
-		Count int `json:"count"`
+		Response   string `json:"response"`
+		References []struct {
+			ReferenceID string `json:"reference_id"`
+			FilePath    string `json:"file_path"`
+		} `json:"references"`
 	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil || result.Response == "" {
 		return string(respBody), nil
 	}
 
-	if result.Count == 0 {
-		return "No relevant knowledge base entries found for this query.", nil
-	}
-
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Knowledge Base Results (%d):\n\n", result.Count))
-	for i, r := range result.Results {
-		b.WriteString(fmt.Sprintf("--- Result %d (similarity: %.3f, id: %s) ---\n", i+1, r.Similarity, r.ID))
-		if len(r.Metadata) > 0 {
-			for k, v := range r.Metadata {
-				b.WriteString(fmt.Sprintf("  %s: %s\n", k, v))
-			}
+	b.WriteString(result.Response)
+	if len(result.References) > 0 {
+		b.WriteString("\n\nSources:")
+		for _, ref := range result.References {
+			b.WriteString(fmt.Sprintf("\n  [%s] %s", ref.ReferenceID, ref.FilePath))
 		}
-		b.WriteString(r.Content)
-		b.WriteString("\n\n")
 	}
 	return b.String(), nil
 }

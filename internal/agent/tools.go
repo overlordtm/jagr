@@ -256,14 +256,9 @@ func GetAvailableTools() []Tool {
 						"type":        "string",
 						"description": "Natural language search query describing what you want to know",
 					},
-					"collection": map[string]any{
-						"type":        "string",
-						"description": "Knowledge collection to search (default: 'default')",
-						"default":     "default",
-					},
 					"top_k": map[string]any{
 						"type":        "integer",
-						"description": "Number of results to return (default: 5)",
+						"description": "Number of top entities/relations to retrieve (default: 5)",
 						"default":     5,
 					},
 				},
