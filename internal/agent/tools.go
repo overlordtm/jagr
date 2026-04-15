@@ -341,7 +341,7 @@ func GetAvailableTools() []Tool {
 		},
 		{
 			Name:        "delegate_investigation",
-			Description: "Spawn an Investigator Agent to drill deeply into a specific suspicious file, process, or configuration.",
+			Description: "Immediately spawn an Investigator Agent for a suspicious file, process, or configuration. Call this as soon as you see anything suspicious — do NOT read further into it yourself first. Multiple delegates can run in parallel.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

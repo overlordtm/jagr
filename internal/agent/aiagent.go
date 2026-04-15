@@ -89,25 +89,30 @@ func (a *AiAgent) Run() error {
 
 	// Append iteration budget to the system prompt so the agent knows from the start.
 	a.llmContext.Append(Message{Role: "system", Content: fmt.Sprintf(
-		"## Iteration Budget\nYou have a maximum of %d iterations. Use them efficiently. When %d or fewer remain, stop investigating and submit your findings with `conclude`.",
-		iterLimit, 3,
+		"## Iteration Budget\nYou have a maximum of %d iterations. Scan broadly and delegate suspicious targets immediately — do not investigate deeply yourself. When %d or fewer iterations remain, stop scanning and call `conclude`.",
+		iterLimit, 5,
 	)})
 
-	budgetWarnInjected := false
 	for a.iterations < iterLimit {
-		// Inject an urgent warning 3 iterations before the limit (once only).
-		if !budgetWarnInjected && iterLimit-a.iterations == 3 {
+		remaining := iterLimit - a.iterations
+
+		// Unconditional checkpoint every 10 iterations so agents always know
+		// their budget, regardless of whether context compaction fired.
+		if a.iterations > 0 && a.iterations%10 == 0 {
 			a.injectProgressCheckpoint(iterLimit)
-			budgetWarnInjected = true
 		}
 
-		// Run batch context compression every 5 iterations if history is large
+		// Urgent warning at exactly 3 remaining (once only, takes priority).
+		if remaining == 3 {
+			a.injectProgressCheckpoint(iterLimit)
+		}
+
+		// Run batch context compression every 5 iterations if history is large.
 		if a.iterations > 0 && a.iterations%5 == 0 && len(a.llmContext.RawHistory()) > 20 {
 			a.harness.logger.Info("Compacting agent context", zap.String("name", a.name))
 			if err := a.llmContext.Compact(); err != nil {
 				a.harness.logger.Warn("Context compaction failed", zap.Error(err))
 			}
-
 			// Inject a progress checkpoint after compaction so the agent
 			// knows what it has already done and how much budget remains.
 			a.injectProgressCheckpoint(iterLimit)
@@ -179,7 +184,11 @@ func (a *AiAgent) injectProgressCheckpoint(iterLimit int) {
 	remaining := iterLimit - a.iterations
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Progress Checkpoint\n")
-	fmt.Fprintf(&b, "- Iteration %d of %d (%d remaining). If remaining <= 3, submit findings NOW and call conclude.\n", a.iterations, iterLimit, remaining)
+	if remaining <= 3 {
+		fmt.Fprintf(&b, "- **URGENT: Iteration %d of %d — only %d iterations remaining. Submit all findings NOW and call conclude immediately.**\n", a.iterations, iterLimit, remaining)
+	} else {
+		fmt.Fprintf(&b, "- Iteration %d of %d (%d remaining).\n", a.iterations, iterLimit, remaining)
+	}
 
 	submitted := a.findingsStore.GetByAgent(a.name)
 	if len(submitted) > 0 {
