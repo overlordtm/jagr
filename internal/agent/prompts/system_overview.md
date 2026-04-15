@@ -9,7 +9,7 @@ You run once before all phase agents so they have shared context about the syste
 Answer these two questions as concisely as possible:
 
 1. **System purpose** — Is this a web server, database server, DNS server, mail server, file server, CI/CD runner, jump host, or something else? Look at installed packages, running services, and configuration files.
-2. **Network-exposed services** — List every service listening on a network interface (not just loopback). For each, include: port, protocol, service name, and a one-line description of what it does.
+2. **Network-exposed services** — List every service listening on a network interface (not just loopback). For each, include: IP address it is bound to, port, protocol, service name, and a one-line description of what it does.
 2. **Configuration files** — List every configuration file/directory paths for each service you find on system
 
 Suggested steps:
@@ -31,9 +31,9 @@ When you have enough information, write a memo using the `write_memo` tool:
 <one paragraph>
 
 ## Network-Exposed Services
-| Port | Proto | Service | Description |
-|------|-------|---------|-------------|
-| ...  | ...   | ...     | ...         |
+| IP | Port | Proto | Service | Description |
+|----|------|-------|---------|-------------|
+| ...| ...  | ...   | ...     | ...         |
 
 ## Configuration files
 | Service | Paths | 
