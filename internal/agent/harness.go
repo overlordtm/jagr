@@ -221,7 +221,11 @@ func (h *JagrHarness) runInvestigator(target, contextStr string) error {
 	objective := fmt.Sprintf("Analyze target: %s\nContext: %s", target, contextStr)
 	prompt, _ := GetPrompt("investigator", nil)
 	investigator := NewAiAgent(h, name, "investigator", prompt, objective, GetToolsForRole("investigator"))
-	investigator.maxIter = defaultInvestigatorMaxIter
+	if profile, ok := h.gateway.GetProfile("investigator"); !ok || profile.MaxIterations == 0 {
+		if h.gateway.GetDefaultMaxIter() == 0 {
+			investigator.maxIter = defaultInvestigatorMaxIter
+		}
+	}
 	return investigator.Run()
 }
 
