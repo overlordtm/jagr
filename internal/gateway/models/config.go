@@ -12,30 +12,17 @@ type Config struct {
 	Logging   LoggingConfig  `yaml:"logging"`
 	Dashboard DashboardConfig `yaml:"dashboard"`
 	Timeouts  TimeoutConfig  `yaml:"timeouts"`
-	Knowledge *KnowledgeConfig `yaml:"knowledge,omitempty"`
+	Knowledge *LightRAGConfig `yaml:"knowledge,omitempty"`
 	DefaultMaxIterations int                    `yaml:"default_max_iterations,omitempty"`
 	Agents               map[string]AgentProfile `yaml:"agents,omitempty"`
 	SkillsDir            string                  `yaml:"skills_dir,omitempty"`
 }
 
-type KnowledgeConfig struct {
-	// Backend selects the store implementation: "chromem" (default), "redis".
-	Backend string `yaml:"backend"`
-
-	// DataDir is the on-disk path for persistent backends.
-	// Empty means in-memory only.
-	DataDir string `yaml:"data_dir"`
-
-	// Embedding configures the embedding function.
-	Embedding EmbeddingProviderConfig `yaml:"embedding"`
-}
-
-type EmbeddingProviderConfig struct {
-	// Provider: "openai", "openai_compatible", "ollama".
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	BaseURL  string `yaml:"base_url"`
-	APIKey   string `yaml:"api_key"`
+type LightRAGConfig struct {
+	BaseURL string `yaml:"base_url"`
+	APIKey  string `yaml:"api_key"`
+	// Mode is the default query mode: local, global, hybrid, naive, mix (default), bypass.
+	Mode string `yaml:"mode,omitempty"`
 }
 
 type AgentProfile struct {

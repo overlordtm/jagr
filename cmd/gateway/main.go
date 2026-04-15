@@ -1,10 +1,10 @@
 package main
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +14,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/overlordtm/jagr/internal/gateway"
-	"github.com/overlordtm/jagr/internal/gateway/knowledge"
 	"github.com/overlordtm/jagr/internal/gateway/models"
 )
 
@@ -84,16 +83,15 @@ func main() {
 
 	// --- ingest subcommand ---
 	var (
-		ingestCollection string
-		ingestChunkSize  int
+		ingestChunkSize int
 	)
 	ingestCmd := &cobra.Command{
 		Use:   "ingest [path...]",
-		Short: "Ingest documents into the knowledge base",
-		Long: `Load files into the knowledge base for RAG retrieval by agents.
+		Short: "Ingest documents into the LightRAG knowledge base",
+		Long: `Load files into LightRAG for RAG retrieval by agents.
 
 Accepts file paths or directories (recursively scanned for .md, .txt, .yaml, .yml, .json, .conf files).
-Each file becomes one document. Large files are split into chunks.`,
+Each file is sent as a separate text document. Large files are split into chunks.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config, err := loadConfig(configPath)
@@ -104,21 +102,8 @@ Each file becomes one document. Large files are split into chunks.`,
 				return fmt.Errorf("knowledge section not configured in %s", configPath)
 			}
 
-			kbCfg := &knowledge.Config{
-				Backend: config.Knowledge.Backend,
-				DataDir: config.Knowledge.DataDir,
-				Embedding: knowledge.EmbeddingConfig{
-					Provider: config.Knowledge.Embedding.Provider,
-					Model:    config.Knowledge.Embedding.Model,
-					BaseURL:  config.Knowledge.Embedding.BaseURL,
-					APIKey:   config.Knowledge.Embedding.APIKey,
-				},
-			}
-			store, err := knowledge.NewStore(kbCfg)
-			if err != nil {
-				return fmt.Errorf("failed to create knowledge store: %w", err)
-			}
-			defer store.Close()
+			baseURL := strings.TrimRight(config.Knowledge.BaseURL, "/")
+			apiKey := config.Knowledge.APIKey
 
 			// Collect files from all paths
 			var files []string
@@ -150,51 +135,127 @@ Each file becomes one document. Large files are split into chunks.`,
 				return nil
 			}
 
-			fmt.Printf("Ingesting %d files into collection %q...\n", len(files), ingestCollection)
+			fmt.Printf("Ingesting %d files into LightRAG...\n", len(files))
 
-			ctx := context.Background()
-			var docs []knowledge.Document
-
+			var texts, sources []string
 			for _, f := range files {
 				data, err := os.ReadFile(f)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", f, err)
 					continue
 				}
-				content := string(data)
-				chunks := chunkContent(content, ingestChunkSize)
-
-				for i, chunk := range chunks {
-					hash := sha256.Sum256([]byte(chunk))
-					id := hex.EncodeToString(hash[:8])
-					if len(chunks) > 1 {
-						id = fmt.Sprintf("%s-part%d", id, i+1)
-					}
-
-					docs = append(docs, knowledge.Document{
-						ID:      id,
-						Content: chunk,
-						Metadata: map[string]string{
-							"source": f,
-							"part":   fmt.Sprintf("%d/%d", i+1, len(chunks)),
-						},
-					})
+				chunks := chunkContent(string(data), ingestChunkSize)
+				for _, chunk := range chunks {
+					texts = append(texts, chunk)
+					sources = append(sources, f)
 				}
 			}
 
-			if err := store.AddDocuments(ctx, ingestCollection, docs); err != nil {
-				return fmt.Errorf("ingest failed: %w", err)
+			body, _ := json.Marshal(map[string]any{"texts": texts, "file_sources": sources})
+			req, err := http.NewRequest(http.MethodPost, baseURL+"/documents/texts", bytes.NewReader(body))
+			if err != nil {
+				return fmt.Errorf("building request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("ingest request failed: %w", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("LightRAG returned %s", resp.Status)
 			}
 
-			fmt.Printf("Done. Ingested %d document chunks from %d files.\n", len(docs), len(files))
+			fmt.Printf("Done. Ingested %d chunks from %d files.\n", len(texts), len(files))
 			return nil
 		},
 	}
-	ingestCmd.Flags().StringVar(&ingestCollection, "collection", "default", "Target collection name")
 	ingestCmd.Flags().IntVar(&ingestChunkSize, "chunk-size", 2000, "Max characters per chunk (0 = no chunking)")
 	ingestCmd.Flags().StringVar(&configPath, "config", "gateway.yaml", "Path to gateway config file")
 
 	rootCmd.AddCommand(ingestCmd)
+
+	// --- query subcommand ---
+	var (
+		queryMode string
+		queryTopK int
+		queryRefs bool
+	)
+	queryCmd := &cobra.Command{
+		Use:   "query <text>",
+		Short: "Run a test query against the LightRAG knowledge base",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, err := loadConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			if config.Knowledge == nil {
+				return fmt.Errorf("knowledge section not configured in %s", configPath)
+			}
+
+			baseURL := strings.TrimRight(config.Knowledge.BaseURL, "/")
+			apiKey := config.Knowledge.APIKey
+
+			mode := queryMode
+			if mode == "" {
+				mode = config.Knowledge.Mode
+			}
+			if mode == "" {
+				mode = "mix"
+			}
+
+			payload := map[string]any{
+				"query":              strings.Join(args, " "),
+				"mode":               mode,
+				"include_references": queryRefs,
+			}
+			if queryTopK > 0 {
+				payload["top_k"] = queryTopK
+			}
+
+			body, _ := json.Marshal(payload)
+			req, err := http.NewRequest(http.MethodPost, baseURL+"/query", bytes.NewReader(body))
+			if err != nil {
+				return fmt.Errorf("building request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("query failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			var result map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				return fmt.Errorf("decoding response (status %s): %w", resp.Status, err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("LightRAG returned %s: %v", resp.Status, result)
+			}
+
+			fmt.Println(result["response"])
+
+			if queryRefs {
+				if refs, ok := result["references"]; ok && refs != nil {
+					fmt.Println("\n--- References ---")
+					refsJSON, _ := json.MarshalIndent(refs, "", "  ")
+					fmt.Println(string(refsJSON))
+				}
+			}
+			return nil
+		},
+	}
+	queryCmd.Flags().StringVar(&queryMode, "mode", "", "Query mode: local, global, hybrid, naive, mix, bypass (default from config)")
+	queryCmd.Flags().IntVar(&queryTopK, "top-k", 0, "Number of top entities/relations to retrieve (0 = LightRAG default)")
+	queryCmd.Flags().BoolVar(&queryRefs, "refs", false, "Print source references alongside the response")
+	queryCmd.Flags().StringVar(&configPath, "config", "gateway.yaml", "Path to gateway config file")
+
+	rootCmd.AddCommand(queryCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
