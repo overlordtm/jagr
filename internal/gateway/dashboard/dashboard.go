@@ -1149,12 +1149,40 @@ func (d *Dashboard) sessionMemosPartial(w http.ResponseWriter, r *http.Request) 
 	agentID := vars["agent_id"]
 	sessionID := vars["session_id"]
 
-	memos, err := d.store.GetMemos(agentID, "", "", sessionID, "", "", 200)
+	sessionMemos, err := d.store.GetMemos(agentID, "", "", sessionID, "", "", 200)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	d.render(w, "memos_partial", memos)
+
+	agent, err := d.store.GetAgent(agentID)
+	if err != nil {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	hostMemos, err := d.store.GetMemos(agentID, "host", agent.Hostname, "", "", "", 200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	seen := make(map[string]struct{}, len(sessionMemos))
+	merged := make([]models.Memo, 0, len(sessionMemos)+len(hostMemos))
+	for _, m := range sessionMemos {
+		seen[m.ID] = struct{}{}
+		merged = append(merged, m)
+	}
+	for _, m := range hostMemos {
+		if _, ok := seen[m.ID]; !ok {
+			merged = append(merged, m)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].CreatedAt.Before(merged[j].CreatedAt)
+	})
+
+	d.render(w, "memos_partial", merged)
 }
 
 func (d *Dashboard) deleteSessionPartial(w http.ResponseWriter, r *http.Request) {
