@@ -86,6 +86,7 @@ func (h *JagrHarness) Run() error {
 		"Filesystem",
 		"LogAnalysis",
 		"ConfigAudit",
+		"ThreatIntel",
 	}
 
 	var wg sync.WaitGroup
