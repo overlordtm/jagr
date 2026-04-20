@@ -9,7 +9,7 @@ marked.setOptions({
 });
 
 function renderMarkdown(root) {
-  root.querySelectorAll(".msg-content").forEach(function (el) {
+  root.querySelectorAll(".msg-content, .memo-content").forEach(function (el) {
     if (el.dataset.rendered) return;
     el.dataset.rendered = "1";
     var raw = el.textContent;

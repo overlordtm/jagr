@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +80,21 @@ func init() {
 				return s[:8]
 			}
 			return s
+		},
+		"nextSortOrder": func(currentSort, currentOrder, targetSort string) string {
+			if currentSort == targetSort && currentOrder == "asc" {
+				return "desc"
+			}
+			return "asc"
+		},
+		"sortIndicator": func(currentSort, targetSort, currentOrder string) string {
+			if currentSort != targetSort {
+				return ""
+			}
+			if currentOrder == "asc" {
+				return "↑"
+			}
+			return "↓"
 		},
 		"roleColor": func(role string) string {
 			switch role {
@@ -704,36 +720,87 @@ func (d *Dashboard) sessionHandler(w http.ResponseWriter, r *http.Request) {
 // HTMX partial handlers
 
 func (d *Dashboard) agentsPartial(w http.ResponseWriter, r *http.Request) {
+	search := r.URL.Query().Get("search")
+	sortBy := r.URL.Query().Get("sort")
+	order := r.URL.Query().Get("order")
+	if order != "desc" {
+		order = "asc"
+	}
+
 	agents, err := d.store.GetAgents()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Get session counts per agent
 	type agentRow struct {
 		models.Agent
-		SessionCount int
-		LastActive   string
+		SessionCount   int
+		LastActiveTime time.Time
+		ReportCount    int
+		FindingCount   int
 	}
 
 	var rows []agentRow
 	for _, a := range agents {
+		if search != "" && !strings.Contains(strings.ToLower(a.Hostname), strings.ToLower(search)) {
+			continue
+		}
 		sessions, _ := d.store.GetSessions(a.ID)
-		lastActive := "never"
+		var lastActiveTime time.Time
 		for _, s := range sessions {
-			if lastActive == "never" || s.UpdatedAt.After(a.CreatedAt) {
-				lastActive = timeAgo(s.UpdatedAt)
+			if lastActiveTime.IsZero() || s.UpdatedAt.After(lastActiveTime) {
+				lastActiveTime = s.UpdatedAt
 			}
 		}
+		reportCount, _ := d.store.GetReportCountForAgent(a.ID)
+		findingCount, _ := d.store.GetFindingCountForAgent(a.ID)
 		rows = append(rows, agentRow{
-			Agent:        a,
-			SessionCount: len(sessions),
-			LastActive:   lastActive,
+			Agent:          a,
+			SessionCount:   len(sessions),
+			LastActiveTime: lastActiveTime,
+			ReportCount:    reportCount,
+			FindingCount:   findingCount,
 		})
 	}
 
-	d.render(w, "agents_partial", rows)
+	if sortBy != "" {
+		sort.Slice(rows, func(i, j int) bool {
+			var less bool
+			switch sortBy {
+			case "hostname":
+				less = rows[i].Hostname < rows[j].Hostname
+			case "sessions":
+				less = rows[i].SessionCount < rows[j].SessionCount
+			case "reports":
+				less = rows[i].ReportCount < rows[j].ReportCount
+			case "findings":
+				less = rows[i].FindingCount < rows[j].FindingCount
+			case "enrolled":
+				less = rows[i].CreatedAt.Before(rows[j].CreatedAt)
+			default: // last_active
+				less = rows[i].LastActiveTime.Before(rows[j].LastActiveTime)
+			}
+			if order == "desc" {
+				return !less
+			}
+			return less
+		})
+	}
+
+	type agentsData struct {
+		Rows   []agentRow
+		Search string
+		Sort   string
+		Order  string
+	}
+
+	d.render(w, "agents_partial", agentsData{
+		Rows:   rows,
+		Search: search,
+		Sort:   sortBy,
+		Order:  order,
+	})
 }
 
 func (d *Dashboard) statsPartial(w http.ResponseWriter, r *http.Request) {

@@ -41,7 +41,8 @@
             "options": {
                 "cwd": "${workspaceFolder}/web"
             },
-            "command": "npm run dev"
+            "command": "npm run dev",
+            "problemMatcher": []
         },
         {
             "label": "build-prod",

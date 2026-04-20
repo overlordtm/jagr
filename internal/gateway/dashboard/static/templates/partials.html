@@ -20,18 +20,49 @@
 {{end}}
 
 {{define "agents_partial"}}
-{{if .}}
+{{$s := .Sort}}{{$o := .Order}}
+<div class="px-5 py-3 border-b border-gray-800">
+    <input
+        type="search"
+        name="search"
+        value="{{.Search}}"
+        placeholder="Search by hostname..."
+        class="w-full bg-gray-800 text-sm text-white placeholder-gray-600 border border-gray-700 rounded-lg px-3 py-1.5 focus:outline-none focus:border-gray-500"
+        hx-get="/partials/agents"
+        hx-trigger="input changed delay:300ms, search"
+        hx-target="#agents-table"
+        hx-swap="innerHTML"
+        hx-include="this,[name='_agents_sort'],[name='_agents_order']"
+    >
+    <input type="hidden" name="_agents_sort" value="{{$s}}">
+    <input type="hidden" name="_agents_order" value="{{$o}}">
+</div>
+{{if .Rows}}
 <table class="min-w-full">
     <thead>
         <tr class="border-b border-gray-800">
-            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Hostname</th>
-            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sessions</th>
-            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Active</th>
-            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Enrolled</th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <button hx-get="/partials/agents" hx-target="#agents-table" hx-swap="innerHTML" hx-include="[name='search']" hx-vals='{"sort":"hostname","order":"{{nextSortOrder $s $o "hostname"}}"}' class="hover:text-gray-300 transition-colors">Hostname {{sortIndicator $s "hostname" $o}}</button>
+            </th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <button hx-get="/partials/agents" hx-target="#agents-table" hx-swap="innerHTML" hx-include="[name='search']" hx-vals='{"sort":"sessions","order":"{{nextSortOrder $s $o "sessions"}}"}' class="hover:text-gray-300 transition-colors">Sessions {{sortIndicator $s "sessions" $o}}</button>
+            </th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <button hx-get="/partials/agents" hx-target="#agents-table" hx-swap="innerHTML" hx-include="[name='search']" hx-vals='{"sort":"reports","order":"{{nextSortOrder $s $o "reports"}}"}' class="hover:text-gray-300 transition-colors">Reports {{sortIndicator $s "reports" $o}}</button>
+            </th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <button hx-get="/partials/agents" hx-target="#agents-table" hx-swap="innerHTML" hx-include="[name='search']" hx-vals='{"sort":"findings","order":"{{nextSortOrder $s $o "findings"}}"}' class="hover:text-gray-300 transition-colors">Findings {{sortIndicator $s "findings" $o}}</button>
+            </th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <button hx-get="/partials/agents" hx-target="#agents-table" hx-swap="innerHTML" hx-include="[name='search']" hx-vals='{"sort":"last_active","order":"{{nextSortOrder $s $o "last_active"}}"}' class="hover:text-gray-300 transition-colors">Last Active {{sortIndicator $s "last_active" $o}}</button>
+            </th>
+            <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <button hx-get="/partials/agents" hx-target="#agents-table" hx-swap="innerHTML" hx-include="[name='search']" hx-vals='{"sort":"enrolled","order":"{{nextSortOrder $s $o "enrolled"}}"}' class="hover:text-gray-300 transition-colors">Enrolled {{sortIndicator $s "enrolled" $o}}</button>
+            </th>
         </tr>
     </thead>
     <tbody>
-        {{range .}}
+        {{range .Rows}}
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer transition-colors" onclick="window.location='/agents/{{.ID}}'">
             <td class="px-5 py-4">
                 <div class="font-medium text-white">{{.Hostname}}</div>
@@ -40,7 +71,13 @@
             <td class="px-5 py-4">
                 <span class="inline-flex items-center justify-center min-w-[1.5rem] rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-300">{{.SessionCount}}</span>
             </td>
-            <td class="px-5 py-4 text-sm text-gray-400">{{.LastActive}}</td>
+            <td class="px-5 py-4">
+                <span class="inline-flex items-center justify-center min-w-[1.5rem] rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-300">{{.ReportCount}}</span>
+            </td>
+            <td class="px-5 py-4">
+                <span class="inline-flex items-center justify-center min-w-[1.5rem] rounded-full bg-gray-800 px-2 py-0.5 text-xs font-medium text-gray-300">{{.FindingCount}}</span>
+            </td>
+            <td class="px-5 py-4 text-sm text-gray-400">{{if .LastActiveTime.IsZero}}never{{else}}{{formatTime .LastActiveTime}}{{end}}</td>
             <td class="px-5 py-4 text-sm text-gray-500">{{timeAgo .CreatedAt}}</td>
         </tr>
         {{end}}
@@ -48,8 +85,8 @@
 </table>
 {{else}}
 <div class="p-12 text-center">
-    <p class="text-gray-600">No agents registered yet.</p>
-    <p class="text-xs text-gray-700 mt-1">Agents will appear here once they connect to the gateway.</p>
+    <p class="text-gray-600">{{if .Search}}No agents match "{{.Search}}".{{else}}No agents registered yet.{{end}}</p>
+    {{if not .Search}}<p class="text-xs text-gray-700 mt-1">Agents will appear here once they connect to the gateway.</p>{{end}}
 </div>
 {{end}}
 {{end}}
@@ -523,11 +560,11 @@
             </div>
             {{if isLong .Content}}
             <details>
-                <summary class="text-sm text-gray-300 cursor-pointer hover:text-white transition-colors whitespace-pre-wrap break-words leading-relaxed">{{previewContent .Content}}</summary>
-                <div class="mt-2 text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
+                <summary class="text-sm text-gray-300 cursor-pointer hover:text-white transition-colors break-words leading-relaxed">{{previewContent .Content}}</summary>
+                <div class="mt-2 text-sm text-gray-300 memo-content break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
             </details>
             {{else}}
-            <p class="text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">{{.Content}}</p>
+            <div class="text-sm text-gray-300 memo-content break-words leading-relaxed">{{.Content}}</div>
             {{end}}
         </div>
     </div>

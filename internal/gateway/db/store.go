@@ -708,6 +708,26 @@ func (s *Store) HasReport(sessionID string) (bool, error) {
 	return count > 0, err
 }
 
+func (s *Store) GetFindingCountForAgent(agentID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM session_findings f
+		JOIN sessions s ON f.session_id = s.id
+		WHERE s.agent_id = ?
+	`, agentID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) GetReportCountForAgent(agentID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM session_reports r
+		JOIN sessions s ON r.session_id = s.id
+		WHERE s.agent_id = ?
+	`, agentID).Scan(&count)
+	return count, err
+}
+
 // --- Agent Configs ---
 
 func (s *Store) AddAgentConfig(sessionID string, c *models.SessionAgentConfig) error {
