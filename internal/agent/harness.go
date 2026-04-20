@@ -13,6 +13,11 @@ import (
 	"go.uber.org/zap"
 )
 
+type pendingInvestigation struct {
+	target     string
+	contextStr string
+}
+
 // JagrHarness orchestrates the multi-phase security investigation.
 // It spawns and manages AiAgents, collects findings, and generates reports.
 type JagrHarness struct {
@@ -30,21 +35,26 @@ type JagrHarness struct {
 	findingsStore *FindingsStore
 
 	investigatorCounter int64 // atomic counter for unique investigator names
+
+	pendingMu           sync.Mutex
+	pendingInvestigations []pendingInvestigation
+	investigatedTargets   map[string]bool
 }
 
 // NewJagrHarness creates a new JagrHarness for orchestrating an investigation.
 func NewJagrHarness(mode string, maxIter, maxToolFailures int, model, objective, outputDir string, logger *zap.Logger, gateway *GatewayClient, cleanRoom *CleanRoom) *JagrHarness {
 	return &JagrHarness{
-		maxIter:         maxIter,
-		maxToolFailures: maxToolFailures,
-		model:           model,
-		objective:       objective,
-		outputDir:       outputDir,
-		logger:          logger,
-		gateway:         gateway,
-		cleanRoom:       cleanRoom,
-		findingsStore:   NewFindingsStore(),
-		startTime:       time.Now(),
+		maxIter:             maxIter,
+		maxToolFailures:     maxToolFailures,
+		model:               model,
+		objective:           objective,
+		outputDir:           outputDir,
+		logger:              logger,
+		gateway:             gateway,
+		cleanRoom:           cleanRoom,
+		findingsStore:       NewFindingsStore(),
+		startTime:           time.Now(),
+		investigatedTargets: make(map[string]bool),
 	}
 }
 
@@ -126,6 +136,9 @@ func (h *JagrHarness) Run() error {
 		}(p)
 	}
 	wg.Wait()
+
+	// All phase agents have concluded — now run deduplicated investigators.
+	h.runQueuedInvestigations()
 
 	// If ALL phases failed, treat as fatal
 	if len(phaseErrors) == len(phases) {
@@ -212,22 +225,62 @@ func (h *JagrHarness) runSystemOverview(hostContext string) string {
 	return content
 }
 
-func (h *JagrHarness) runInvestigator(target, contextStr string) error {
+// queueInvestigation enqueues a target for investigation after all phases complete.
+// It is safe to call from multiple goroutines. Duplicate targets are silently dropped.
+// Returns true if the target was newly enqueued, false if it was a duplicate or self-target.
+func (h *JagrHarness) queueInvestigation(target, contextStr string) bool {
 	if h.isSelfTarget(target) {
 		h.logger.Info("Skipping self-investigation target", zap.String("target", target))
-		return nil
+		return false
 	}
 
-	name := fmt.Sprintf("investigator-%d", atomic.AddInt64(&h.investigatorCounter, 1))
-	objective := fmt.Sprintf("Analyze target: %s\nContext: %s", target, contextStr)
-	prompt, _ := GetPrompt("investigator", nil)
-	investigator := NewAiAgent(h, name, "investigator", prompt, objective, GetToolsForRole("investigator"))
-	if profile, ok := h.gateway.GetProfile("investigator"); !ok || profile.MaxIterations == 0 {
-		if h.gateway.GetDefaultMaxIter() == 0 {
-			investigator.maxIter = defaultInvestigatorMaxIter
-		}
+	h.pendingMu.Lock()
+	defer h.pendingMu.Unlock()
+
+	if h.investigatedTargets[target] {
+		h.logger.Info("Duplicate investigation target skipped", zap.String("target", target))
+		return false
 	}
-	return investigator.Run()
+	h.investigatedTargets[target] = true
+	h.pendingInvestigations = append(h.pendingInvestigations, pendingInvestigation{target: target, contextStr: contextStr})
+	h.logger.Info("Queued investigation target", zap.String("target", target))
+	return true
+}
+
+// runQueuedInvestigations drains the pending queue and runs all investigators in parallel.
+// Must be called only after all phase agents have completed.
+func (h *JagrHarness) runQueuedInvestigations() {
+	h.pendingMu.Lock()
+	targets := h.pendingInvestigations
+	h.pendingInvestigations = nil
+	h.pendingMu.Unlock()
+
+	if len(targets) == 0 {
+		return
+	}
+
+	h.logger.Info("Running queued investigations", zap.Int("count", len(targets)))
+	var wg sync.WaitGroup
+	for _, inv := range targets {
+		inv := inv
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("investigator-%d", atomic.AddInt64(&h.investigatorCounter, 1))
+			objective := fmt.Sprintf("Analyze target: %s\nContext: %s", inv.target, inv.contextStr)
+			prompt, _ := GetPrompt("investigator", nil)
+			investigator := NewAiAgent(h, name, "investigator", prompt, objective, GetToolsForRole("investigator"))
+			if profile, ok := h.gateway.GetProfile("investigator"); !ok || profile.MaxIterations == 0 {
+				if h.gateway.GetDefaultMaxIter() == 0 {
+					investigator.maxIter = defaultInvestigatorMaxIter
+				}
+			}
+			if err := investigator.Run(); err != nil {
+				h.logger.Error("Investigator failed", zap.String("target", inv.target), zap.Error(err))
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // isSelfTarget returns true if the target path refers to the agent's own

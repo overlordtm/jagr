@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -28,7 +27,6 @@ type AiAgent struct {
 	toolbox          *ToolBox
 	gateway          *GatewayClient
 	findingsStore    *FindingsStore
-	investigatorWg   sync.WaitGroup
 	delegatedTargets map[string]bool
 	paramsCache      map[string]ToolResult
 	idCache          map[string]ToolResult
@@ -68,7 +66,7 @@ func NewAiAgent(harness *JagrHarness, name, role, systemPrompt, objective string
 // Run executes the agent's think→act→observe loop until concluded or max iterations reached.
 func (a *AiAgent) Run() error {
 	a.harness.logger.Info("Starting AiAgent", zap.String("name", a.name), zap.String("role", a.role))
-	defer a.investigatorWg.Wait()
+
 
 	prompt := a.systemPrompt + "\n\n## Available Tools\n" + a.formatToolsForPrompt()
 	if skillsSection := a.formatSkillsForPrompt(); skillsSection != "" {
@@ -467,28 +465,18 @@ func (a *AiAgent) executeTool(tc ToolCall) (ToolResult, error) {
 		target, _ := args["target"].(string)
 		contextStr, _ := args["context"].(string)
 
-		if a.delegatedTargets[target] {
+		if queued := a.harness.queueInvestigation(target, contextStr); !queued {
 			return ToolResult{
 				ToolID:  tc.ID,
 				Name:    tc.Function.Name,
-				Content: fmt.Sprintf("Investigation of %s already delegated. Continue with other targets or call conclude.", target),
+				Content: fmt.Sprintf("Investigation of %s already queued by another phase or is a self-target. Skipping duplicate.", target),
 			}, nil
 		}
-		a.delegatedTargets[target] = true
-
-		a.harness.logger.Info("Delegating investigation", zap.String("target", target))
-		a.investigatorWg.Add(1)
-		go func() {
-			defer a.investigatorWg.Done()
-			if err := a.harness.runInvestigator(target, contextStr); err != nil {
-				a.harness.logger.Error("Investigator failed", zap.String("target", target), zap.Error(err))
-			}
-		}()
 
 		return ToolResult{
 			ToolID:  tc.ID,
 			Name:    tc.Function.Name,
-			Content: fmt.Sprintf("Delegated investigation of %s to an Investigator Agent.", target),
+			Content: fmt.Sprintf("Investigation of %s queued. It will run after all phase agents conclude.", target),
 		}, nil
 
 	case "conclude":
