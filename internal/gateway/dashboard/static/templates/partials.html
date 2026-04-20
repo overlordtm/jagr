@@ -521,10 +521,14 @@
         <div class="flex items-center gap-3 mb-3">
             <span class="font-mono text-xs text-gray-500 bg-gray-800 rounded px-1.5 py-0.5">Session {{shortID .SessionID}}</span>
             <span class="text-xs text-gray-500">{{timeAgo .CreatedAt}}</span>
+            <a href="/partials/reports/{{.ID}}/download"
+               class="ml-auto px-2.5 py-1 text-xs font-medium rounded-md bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white transition-colors">
+                Download .md
+            </a>
         </div>
         <details>
             <summary class="text-sm text-gray-400 cursor-pointer hover:text-gray-300 transition-colors">View report</summary>
-            <div class="mt-2 prose prose-invert prose-sm max-w-none text-gray-300 whitespace-pre-wrap break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
+            <div class="mt-2 msg-content text-gray-300 break-words leading-relaxed border-l-2 border-gray-800 pl-4">{{.Content}}</div>
         </details>
     </div>
     {{end}}

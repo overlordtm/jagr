@@ -426,6 +426,8 @@ func (d *Dashboard) SetupRoutes(router *mux.Router) {
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/messages", wrap(d.messagesPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/findings", wrap(d.sessionFindingsPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/report", wrap(d.sessionReportPartial)).Methods("GET")
+	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/report/download", wrap(d.sessionReportDownload)).Methods("GET")
+	router.Handle("/partials/reports/{report_id}/download", wrap(d.reportDownload)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/sessions/{session_id}/agent-configs", wrap(d.sessionAgentConfigsPartial)).Methods("GET")
 	router.Handle("/partials/agents/{agent_id}/findings", wrap(d.agentFindingsPartial)).Methods("GET")
 	router.Handle("/partials/findings/{id}/status", wrap(d.updateFindingStatusPartial)).Methods("PATCH")
@@ -936,6 +938,74 @@ func (d *Dashboard) sessionReportPartial(w http.ResponseWriter, r *http.Request)
 	}
 
 	d.render(w, "session_report_partial", report)
+}
+
+func (d *Dashboard) sessionReportDownload(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	agentID := vars["agent_id"]
+	sessionID := vars["session_id"]
+
+	report, err := d.store.GetSessionReport(sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if report == nil {
+		http.Error(w, "no report found", http.StatusNotFound)
+		return
+	}
+
+	agent, err := d.store.GetAgent(agentID)
+	if err != nil || agent == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	hostname := strings.ReplaceAll(agent.Hostname, "/", "-")
+	date := report.CreatedAt.Format("2006-01-02_15-04-05")
+	filename := fmt.Sprintf("%s-%s-%s.md", hostname, date, sessionID[:8])
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Write([]byte(report.Content))
+}
+
+func (d *Dashboard) reportDownload(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	reportIDStr := vars["report_id"]
+	reportID, err := strconv.Atoi(reportIDStr)
+	if err != nil {
+		http.Error(w, "invalid report id", http.StatusBadRequest)
+		return
+	}
+
+	report, err := d.store.GetReportByID(reportID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if report == nil {
+		http.Error(w, "no report found", http.StatusNotFound)
+		return
+	}
+
+	session, err := d.store.GetSession(report.SessionID)
+	if err != nil || session == nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	agent, err := d.store.GetAgent(session.AgentID)
+	if err != nil || agent == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	hostname := strings.ReplaceAll(agent.Hostname, "/", "-")
+	date := report.CreatedAt.Format("2006-01-02_15-04-05")
+	filename := fmt.Sprintf("%s-%s-%s.md", hostname, date, report.SessionID[:8])
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Write([]byte(report.Content))
 }
 
 func (d *Dashboard) sessionAgentConfigsPartial(w http.ResponseWriter, r *http.Request) {

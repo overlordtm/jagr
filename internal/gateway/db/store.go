@@ -702,6 +702,20 @@ func (s *Store) GetReportsForAgent(agentID string) ([]models.SessionReport, erro
 	return reports, rows.Err()
 }
 
+func (s *Store) GetReportByID(reportID int) (*models.SessionReport, error) {
+	var r models.SessionReport
+	err := s.db.QueryRow(`
+		SELECT id, session_id, content, created_at FROM session_reports WHERE id = ?
+	`, reportID).Scan(&r.ID, &r.SessionID, &r.Content, &r.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
 func (s *Store) HasReport(sessionID string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM session_reports WHERE session_id = ?`, sessionID).Scan(&count)

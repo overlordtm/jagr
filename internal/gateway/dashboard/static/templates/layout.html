@@ -364,8 +364,12 @@ function switchAgentTab(btn, tab) {
 <!-- Report Tab -->
 <div id="tab-report" class="session-tab-content hidden">
 <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-    <div class="px-5 py-4 border-b border-gray-800">
+    <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
         <h2 class="text-base font-semibold text-white">Report</h2>
+        <a href="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/report/download"
+           class="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors">
+            Download .md
+        </a>
     </div>
     <div id="report-content"
          hx-get="/partials/agents/{{.Agent.ID}}/sessions/{{.Session.ID}}/report"
