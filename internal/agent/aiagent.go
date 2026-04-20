@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -348,6 +349,17 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 				return parsedCalls, nil
 			}
 
+			// Fallback: some models (e.g. Qwen3) embed tool calls as <tool_call>JSON</tool_call>
+			// in content instead of using the structured tool_calls field.
+			if textCalls := extractTextToolCalls(content); len(textCalls) > 0 {
+				a.llmContext.Append(Message{
+					Role:      "assistant",
+					Content:   content,
+					ToolCalls: textCalls,
+				})
+				return textCalls, nil
+			}
+
 			a.llmContext.Append(Message{
 				Role:    "assistant",
 				Content: content,
@@ -373,6 +385,38 @@ func (a *AiAgent) think() ([]ToolCall, error) {
 	replyJSON, _ := json.Marshal(reply)
 	a.harness.logger.Error("No tool calls in response", zap.String("name", a.name), zap.String("reply", string(replyJSON)))
 	return nil, fmt.Errorf("no tool calls in response")
+}
+
+var reToolCallBlock = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
+
+// extractTextToolCalls parses tool calls embedded in message content as
+// <tool_call>{"name": "...", "arguments": {...}}</tool_call> blocks.
+// Models like Qwen3 use this format instead of the structured tool_calls field.
+func extractTextToolCalls(content string) []ToolCall {
+	matches := reToolCallBlock.FindAllStringSubmatch(content, -1)
+	var calls []ToolCall
+	for i, m := range matches {
+		var payload struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(m[1]), &payload); err != nil || payload.Name == "" {
+			continue
+		}
+		args := string(payload.Arguments)
+		if args == "" || args == "null" {
+			args = "{}"
+		}
+		calls = append(calls, ToolCall{
+			ID:   fmt.Sprintf("call_%d", i),
+			Type: "function",
+			Function: Function{
+				Name:      payload.Name,
+				Arguments: args,
+			},
+		})
+	}
+	return calls
 }
 
 func (a *AiAgent) act(toolCalls []ToolCall) ([]ToolResult, error) {
