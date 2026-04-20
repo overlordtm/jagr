@@ -91,10 +91,24 @@ func (tb *ToolBox) ExecuteTool(tc ToolCall) (ToolResult, error) {
 	case "check_listeners":
 		return tb.execEnrichment(tc, enrichment.EnrichListeners)
 	case "check_packages":
-		return tb.execEnrichment(tc, enrichment.EnrichPackages)
+		return tb.execCheckPackages(tc, args)
 	default:
 		return ToolResult{}, fmt.Errorf("unknown tool: %s", tc.Function.Name)
 	}
+}
+
+func (tb *ToolBox) execCheckPackages(tc ToolCall, args map[string]any) (ToolResult, error) {
+	action, _ := args["action"].(string)
+	if action == "" {
+		action = "verify_all"
+	}
+	target, _ := args["target"].(string)
+	output := enrichment.RunPackageAction(tb.cleanRoom, action, target)
+	return ToolResult{
+		ToolID:  tc.ID,
+		Name:    tc.Function.Name,
+		Content: output,
+	}, nil
 }
 
 // execEnrichment runs a Go-side enrichment parser and returns its formatted output.

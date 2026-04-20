@@ -280,9 +280,25 @@ function switchAgentTab(btn, tab) {
     <div class="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3">
         <div class="flex items-center gap-2 mb-1">
             <svg class="h-4 w-4 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-            <span class="text-sm font-medium text-red-400">Error</span>
+            <span class="text-sm font-medium text-red-400">Session terminated with error</span>
         </div>
         <p class="text-sm text-red-300/80">{{.Session.Error}}</p>
+    </div>
+    {{else if eq .Session.Status "inactive"}}
+    <div class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+        <div class="flex items-center gap-2">
+            <svg class="h-4 w-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+            <span class="text-sm font-medium text-amber-400">Session inactive — agent lost heartbeat</span>
+        </div>
+        <p class="text-sm text-amber-300/70 mt-1">The agent process stopped sending heartbeats. It may have crashed or been killed before completing. Findings submitted so far are preserved.</p>
+    </div>
+    {{else if eq .Session.Status "closed"}}
+    <div class="mt-3 rounded-lg border border-orange-500/30 bg-orange-500/10 px-4 py-3">
+        <div class="flex items-center gap-2">
+            <svg class="h-4 w-4 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span class="text-sm font-medium text-orange-400">Session closed due to inactivity timeout</span>
+        </div>
+        <p class="text-sm text-orange-300/70 mt-1">No activity was recorded within the session timeout window. The session was closed automatically. Findings submitted so far are preserved.</p>
     </div>
     {{end}}
 </div>

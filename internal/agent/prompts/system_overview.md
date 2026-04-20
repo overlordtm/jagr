@@ -18,6 +18,7 @@ Suggested steps:
 - Glance at common config paths (`/etc/nginx`, `/etc/apache2`, `/etc/mysql`, `/etc/postfix`, etc.) if relevant services are found
 - Read `/etc/hostname` and `/etc/hosts` for clues
 - Check installed package managers if purpose is still unclear
+- For any unfamiliar software, service, or configuration, use `query_knowledge_base` to look up exercise documentation, network maps, and manuals before drawing conclusions
 
 ## Output
 

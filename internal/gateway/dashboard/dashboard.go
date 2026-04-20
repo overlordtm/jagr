@@ -116,6 +116,10 @@ func init() {
 				return "bg-sky-500/20 text-sky-400"
 			case "error":
 				return "bg-red-500/20 text-red-400"
+			case "inactive":
+				return "bg-amber-500/20 text-amber-400"
+			case "closed":
+				return "bg-orange-500/20 text-orange-400"
 			case "valid":
 				return "bg-green-500/20 text-green-400"
 			case "invalid":

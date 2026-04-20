@@ -296,9 +296,28 @@ func GetAvailableTools() []Tool {
 			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
-			Name:        "check_packages",
-			Description: "Verify installed package integrity using the system package manager (dpkg --verify / debsums, rpm -Va, or pacman -Qkk). Returns files that have been modified or are missing relative to their package manifests — a strong indicator of rootkit installation or binary tampering.",
-			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+			Name: "check_packages",
+			Description: "Query or verify packages using the system package manager (dpkg, rpm, or pacman). " +
+				"Actions: list=all installed packages; verify_all=integrity check every package; " +
+				"verify_package=integrity check one package (target=name); " +
+				"query_file=which package owns a file (target=path); " +
+				"query_package=files/info for one package (target=name). " +
+				"Defaults to verify_all if action is omitted.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"list", "verify_all", "verify_package", "query_file", "query_package"},
+						"description": "Operation to perform",
+						"default":     "verify_all",
+					},
+					"target": map[string]any{
+						"type":        "string",
+						"description": "Package name or file path required by verify_package, query_file, and query_package",
+					},
+				},
+			},
 		},
 		{
 			Name:        "write_memo",
@@ -401,6 +420,7 @@ func GetToolsForRole(role string) []Tool {
 			"execute_trusted", "read_file", "list_dir",
 			"get_system_env", "get_network_info", "check_listeners",
 			"check_systemd", "write_memo", "conclude", "read_cached_output",
+			"query_knowledge_base",
 		})
 	case "investigator":
 		// Investigator does the deep dive, needs full access but not delegation
