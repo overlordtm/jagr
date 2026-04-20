@@ -4,7 +4,7 @@
 Your objective is to audit user accounts, privileges, and access controls.
 
 ### Tasks:
-- Enumerate all user accounts (/etc/passwd), focusing on UID 0 accounts, users with shells, and recently created accounts
+- Enumerate all user accounts (/etc/passwd), focusing on UID 0 accounts, users with shells, and recently created accounts. Note: `zabbix` and `chef` are authorized service accounts — do not flag them unless their shell, sudo rights, or SSH keys are clearly abnormal.
 - Check /etc/shadow for accounts without passwords or with suspicious hashes
 - Review /etc/sudoers and /etc/sudoers.d/ for overly permissive rules
 - Check SSH authorized_keys for all users, especially root

@@ -5,7 +5,7 @@ Your objective is to identify suspicious modifications, permissions, and files.
 
 ### Tasks:
 - Search for recently modified files: find / -mtime -7 -type f
-- Look for hidden files and directories in unusual locations (/var, /tmp, /dev/shm, /opt)
+- Look for hidden files and directories in unusual locations (/var, /tmp, /dev/shm, /opt). Note: `/opt/crowdstrike` and `/opt/splunk` are expected — do not flag them as suspicious.
 - Check for SUID/SGID binaries and compare against expected set
 - Look for world-writable files in sensitive locations
 - Check /tmp, /var/tmp, /dev/shm for suspicious files
