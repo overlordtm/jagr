@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -89,6 +90,8 @@ func (tb *ToolBox) ExecuteTool(tc ToolCall) (ToolResult, error) {
 		return tb.execEnrichment(tc, enrichment.EnrichModules)
 	case "check_listeners":
 		return tb.execEnrichment(tc, enrichment.EnrichListeners)
+	case "check_packages":
+		return tb.execEnrichment(tc, enrichment.EnrichPackages)
 	default:
 		return ToolResult{}, fmt.Errorf("unknown tool: %s", tc.Function.Name)
 	}
@@ -152,7 +155,39 @@ func (tb *ToolBox) execReadFile(tc ToolCall, args map[string]any) (ToolResult, e
 		maxLines = ml
 	}
 
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	defer f.Close()
+
+	// Detect binary files by reading the first 512 bytes and checking for
+	// non-text content. Reading large binaries into LLM context wastes tokens
+	// and can derail reasoning; use execute_trusted with `file` and `sha256sum`.
+	header := make([]byte, 512)
+	n, _ := f.Read(header)
+	header = header[:n]
+	if isBinaryContent(header) {
+		fi, _ := f.Stat()
+		size := int64(0)
+		if fi != nil {
+			size = fi.Size()
+		}
+		return ToolResult{
+			ToolID: tc.ID,
+			Name:   tc.Function.Name,
+			Content: fmt.Sprintf(
+				"[Binary file — content not shown to avoid context pollution]\nPath: %s\nSize: %d bytes\nTo analyze: use execute_trusted with `file %s` and `sha256sum %s`.",
+				path, size, path, path,
+			),
+		}, nil
+	}
+
+	// Rewind and read the full file.
+	if _, err := f.Seek(0, 0); err != nil {
+		return ToolResult{}, err
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return ToolResult{}, err
 	}
@@ -163,6 +198,26 @@ func (tb *ToolBox) execReadFile(tc ToolCall, args map[string]any) (ToolResult, e
 		Name:    tc.Function.Name,
 		Content: content,
 	}, nil
+}
+
+// isBinaryContent returns true when the byte slice looks like binary data.
+// Checks for ELF magic, common binary magic bytes, or high ratio of non-printable bytes.
+func isBinaryContent(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	// ELF magic
+	if len(b) >= 4 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F' {
+		return true
+	}
+	// Count non-printable, non-whitespace bytes
+	nonText := 0
+	for _, c := range b {
+		if c < 0x08 || (c > 0x0d && c < 0x20 && c != 0x1b) || c == 0x7f {
+			nonText++
+		}
+	}
+	return nonText*10 > len(b) // >10% non-text bytes
 }
 
 func (tb *ToolBox) execWriteFile(tc ToolCall, args map[string]any) (ToolResult, error) {

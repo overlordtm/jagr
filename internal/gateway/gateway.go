@@ -414,14 +414,20 @@ func (g *Gateway) chatCompletionsHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	g.store.AppendMessage(sessionID, &models.Message{
+	assistantMsg := &models.Message{
 		Role:             "assistant",
 		Content:          resp.Choices[0].Message.Content,
 		ReasoningContent: resp.Choices[0].Message.ReasoningContent,
 		ToolCalls:        resp.Choices[0].Message.ToolCalls,
 		AgentRole:        agentRole,
 		AgentName:        agentName,
-	}, resp.Model, tokensIn, tokensOut, tokensThinking, costUSD, int(latency))
+	}
+	// Normalise text-embedded tool calls (e.g. Qwen3) so the stored message
+	// matches what the agent will have in its context after extraction.
+	if len(assistantMsg.ToolCalls) == 0 && assistantMsg.Content != "" {
+		assistantMsg.ToolCalls = extractTextToolCalls(assistantMsg.Content)
+	}
+	g.store.AppendMessage(sessionID, assistantMsg, resp.Model, tokensIn, tokensOut, tokensThinking, costUSD, int(latency))
 
 	g.store.UpdateAgentConfigUpstream(sessionID, agentRole, req.Model, resp.Model, g.config.Providers[0].Name)
 

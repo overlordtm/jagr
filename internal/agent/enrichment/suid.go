@@ -84,18 +84,30 @@ func EnrichSUID(runner Runner) string {
 	return b.String()
 }
 
+// getPackageOwner queries the system package manager (dpkg, rpm, or pacman) for
+// the package owning path. Absolute paths bypass the CleanRoom's BusyBox PATH.
 func getPackageOwner(runner Runner, path string) string {
-	// dpkg -S outputs "package: /path" — BusyBox dpkg doesn't support -S,
-	// so validate the output contains ": " to avoid false results.
-	stdout, _, exitCode, _ := runner.ExecuteTrusted("dpkg", []string{"-S", path})
-	if exitCode == 0 && strings.Contains(stdout, ": ") {
-		return strings.TrimSpace(strings.SplitN(stdout, "\n", 2)[0])
+	// dpkg -S: system dpkg supports file-to-package search; BusyBox does not.
+	for _, bin := range []string{"/usr/bin/dpkg", "/bin/dpkg"} {
+		stdout, _, exitCode, _ := runner.ExecuteTrusted(bin, []string{"-S", path})
+		if exitCode == 0 && strings.Contains(stdout, ": ") {
+			return strings.TrimSpace(strings.SplitN(stdout, "\n", 2)[0])
+		}
 	}
-	// rpm -qf outputs "package-version.arch" — BusyBox rpm doesn't support -qf.
-	stdout, _, exitCode, _ = runner.ExecuteTrusted("rpm", []string{"-qf", path})
-	if exitCode == 0 && stdout != "" && !strings.Contains(stdout, "not owned") &&
-		!strings.Contains(stdout, "BusyBox") && !strings.Contains(stdout, "Usage:") {
-		return strings.TrimSpace(stdout)
+	// rpm -qf: system rpm supports file-to-package query; BusyBox rpm does not.
+	for _, bin := range []string{"/usr/bin/rpm", "/bin/rpm"} {
+		stdout, _, exitCode, _ := runner.ExecuteTrusted(bin, []string{"-qf", "--queryformat", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}", path})
+		if exitCode == 0 && stdout != "" && !strings.Contains(stdout, "not owned") {
+			return strings.TrimSpace(stdout)
+		}
+	}
+	// pacman -Qo: Arch Linux package manager.
+	stdout, _, exitCode, _ := runner.ExecuteTrusted("/usr/bin/pacman", []string{"-Qo", path})
+	if exitCode == 0 && stdout != "" {
+		// Output: "/path/to/file is owned by pkgname version"
+		if parts := strings.Fields(strings.TrimSpace(stdout)); len(parts) >= 5 {
+			return parts[4] + "-" + parts[5]
+		}
 	}
 	return ""
 }

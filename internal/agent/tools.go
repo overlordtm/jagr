@@ -296,6 +296,11 @@ func GetAvailableTools() []Tool {
 			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 		{
+			Name:        "check_packages",
+			Description: "Verify installed package integrity using the system package manager (dpkg --verify / debsums, rpm -Va, or pacman -Qkk). Returns files that have been modified or are missing relative to their package manifests — a strong indicator of rootkit installation or binary tampering.",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		{
 			Name:        "write_memo",
 			Description: "Write a note to remember later. Use 'agent' scope for private notes, 'host' scope to share with other agents on this host, 'exercise' scope for cross-host observations.",
 			Parameters: map[string]any{
@@ -405,7 +410,7 @@ func GetToolsForRole(role string) []Tool {
 			"search_files", "get_network_info", "submit_finding", "conclude",
 			"write_memo", "read_memos", "query_knowledge_base",
 			"check_cron", "check_users", "check_systemd", "check_suid", "check_modules", "check_listeners",
-			"read_cached_output",
+			"check_packages", "read_cached_output",
 		})
 	default:
 		// Phase Agents do broad searches, can delegate investigations
@@ -415,7 +420,7 @@ func GetToolsForRole(role string) []Tool {
 			"search_files", "get_network_info", "delegate_investigation", "conclude",
 			"write_memo", "read_memos", "query_knowledge_base",
 			"check_cron", "check_users", "check_systemd", "check_suid", "check_modules", "check_listeners",
-			"read_cached_output",
+			"check_packages", "read_cached_output",
 		})
 	}
 }
