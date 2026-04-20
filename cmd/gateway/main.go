@@ -178,14 +178,9 @@ Each file is sent as a separate text document. Large files are split into chunks
 	rootCmd.AddCommand(ingestCmd)
 
 	// --- query subcommand ---
-	var (
-		queryMode string
-		queryTopK int
-		queryRefs bool
-	)
 	queryCmd := &cobra.Command{
 		Use:   "query <text>",
-		Short: "Run a test query against the LightRAG knowledge base",
+		Short: "Run a test query against the OpenWebUI knowledge base",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config, err := loadConfig(configPath)
@@ -199,25 +194,15 @@ Each file is sent as a separate text document. Large files are split into chunks
 			baseURL := strings.TrimRight(config.Knowledge.BaseURL, "/")
 			apiKey := config.Knowledge.APIKey
 
-			mode := queryMode
-			if mode == "" {
-				mode = config.Knowledge.Mode
-			}
-			if mode == "" {
-				mode = "mix"
-			}
-
 			payload := map[string]any{
-				"query":              strings.Join(args, " "),
-				"mode":               mode,
-				"include_references": queryRefs,
-			}
-			if queryTopK > 0 {
-				payload["top_k"] = queryTopK
+				"model": "lightrag:latest",
+				"messages": []map[string]string{
+					{"role": "user", "content": strings.Join(args, " ")},
+				},
 			}
 
 			body, _ := json.Marshal(payload)
-			req, err := http.NewRequest(http.MethodPost, baseURL+"/query", bytes.NewReader(body))
+			req, err := http.NewRequest(http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("building request: %w", err)
 			}
@@ -230,29 +215,27 @@ Each file is sent as a separate text document. Large files are split into chunks
 			}
 			defer resp.Body.Close()
 
-			var result map[string]any
+			var result struct {
+				Choices []struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
 			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 				return fmt.Errorf("decoding response (status %s): %w", resp.Status, err)
 			}
 			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("LightRAG returned %s: %v", resp.Status, result)
+				return fmt.Errorf("OpenWebUI returned %s", resp.Status)
+			}
+			if len(result.Choices) == 0 {
+				return fmt.Errorf("empty response from OpenWebUI")
 			}
 
-			fmt.Println(result["response"])
-
-			if queryRefs {
-				if refs, ok := result["references"]; ok && refs != nil {
-					fmt.Println("\n--- References ---")
-					refsJSON, _ := json.MarshalIndent(refs, "", "  ")
-					fmt.Println(string(refsJSON))
-				}
-			}
+			fmt.Println(result.Choices[0].Message.Content)
 			return nil
 		},
 	}
-	queryCmd.Flags().StringVar(&queryMode, "mode", "", "Query mode: local, global, hybrid, naive, mix, bypass (default from config)")
-	queryCmd.Flags().IntVar(&queryTopK, "top-k", 0, "Number of top entities/relations to retrieve (0 = LightRAG default)")
-	queryCmd.Flags().BoolVar(&queryRefs, "refs", false, "Print source references alongside the response")
 	queryCmd.Flags().StringVar(&configPath, "config", "gateway.yaml", "Path to gateway config file")
 
 	rootCmd.AddCommand(queryCmd)

@@ -21,8 +21,6 @@ type Config struct {
 type LightRAGConfig struct {
 	BaseURL string `yaml:"base_url"`
 	APIKey  string `yaml:"api_key"`
-	// Mode is the default query mode: local, global, hybrid, naive, mix (default), bypass.
-	Mode string `yaml:"mode,omitempty"`
 }
 
 type AgentProfile struct {

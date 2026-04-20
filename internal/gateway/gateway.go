@@ -37,10 +37,9 @@ type Gateway struct {
 	config   *models.Config
 	skills   []Skill
 
-	// LightRAG client fields (nil when knowledge is not configured)
+	// OpenWebUI knowledge client fields (nil when knowledge is not configured)
 	lightragBaseURL string
 	lightragAPIKey  string
-	lightragMode    string
 	lightragClient  *http.Client
 
 	mu sync.RWMutex
@@ -83,13 +82,8 @@ func NewGateway(config *models.Config, log *zap.Logger) (*Gateway, error) {
 	}
 
 	if config.Knowledge != nil {
-		mode := config.Knowledge.Mode
-		if mode == "" {
-			mode = "mix"
-		}
 		gw.lightragBaseURL = strings.TrimRight(config.Knowledge.BaseURL, "/")
 		gw.lightragAPIKey = config.Knowledge.APIKey
-		gw.lightragMode = mode
 		gw.lightragClient = &http.Client{Timeout: 120 * time.Second}
 	}
 
@@ -207,9 +201,6 @@ func (g *Gateway) setupRoutes(router *mux.Router) {
 	router.HandleFunc("/v1/memos", g.getMemosHandler).Methods("GET")
 	router.HandleFunc("/v1/skills", g.skillsHandler).Methods("GET")
 	router.HandleFunc("/v1/knowledge/query", g.knowledgeQueryHandler).Methods("POST")
-	router.HandleFunc("/v1/knowledge/ingest", g.knowledgeIngestHandler).Methods("POST")
-	router.HandleFunc("/v1/knowledge/collections", g.knowledgeCollectionsHandler).Methods("GET")
-	router.HandleFunc("/v1/knowledge/collections/{name}", g.knowledgeDeleteCollectionHandler).Methods("DELETE")
 
 	router.HandleFunc("/admin/agents", g.adminAgentsHandler).Methods("GET")
 	router.HandleFunc("/admin/agents/{agent_id}/sessions", g.adminSessionsHandler).Methods("GET")
@@ -950,8 +941,6 @@ func (g *Gateway) knowledgeQueryHandler(w http.ResponseWriter, r *http.Request) 
 
 	var req struct {
 		Query string `json:"query"`
-		Mode  string `json:"mode,omitempty"`
-		TopK  int    `json:"top_k,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -961,22 +950,16 @@ func (g *Gateway) knowledgeQueryHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "query is required", http.StatusBadRequest)
 		return
 	}
-	mode := req.Mode
-	if mode == "" {
-		mode = g.lightragMode
-	}
 
 	lreq := map[string]any{
-		"query":              req.Query,
-		"mode":               mode,
-		"include_references": true,
-	}
-	if req.TopK > 0 {
-		lreq["top_k"] = req.TopK
+		"model": "lightrag:latest",
+		"messages": []map[string]string{
+			{"role": "user", "content": req.Query},
+		},
 	}
 
 	body, _ := json.Marshal(lreq)
-	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.lightragBaseURL+"/query", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.lightragBaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "failed to build request", http.StatusInternalServerError)
 		return
@@ -986,7 +969,7 @@ func (g *Gateway) knowledgeQueryHandler(w http.ResponseWriter, r *http.Request) 
 
 	resp, err := g.lightragClient.Do(httpReq)
 	if err != nil {
-		g.log.Error("LightRAG query failed", zap.Error(err))
+		g.log.Error("OpenWebUI knowledge query failed", zap.Error(err))
 		http.Error(w, "knowledge query failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -994,99 +977,31 @@ func (g *Gateway) knowledgeQueryHandler(w http.ResponseWriter, r *http.Request) 
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		http.Error(w, "failed to read LightRAG response", http.StatusInternalServerError)
+		http.Error(w, "failed to read knowledge response", http.StatusInternalServerError)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
-		g.log.Error("LightRAG returned error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
+		g.log.Error("OpenWebUI knowledge query error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
 		http.Error(w, "knowledge query failed: "+string(respBody), resp.StatusCode)
 		return
 	}
 
+	// Extract the assistant message text and return it in a simple envelope
+	var owResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &owResp); err != nil || len(owResp.Choices) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(respBody)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(respBody)
-}
-
-func (g *Gateway) knowledgeIngestHandler(w http.ResponseWriter, r *http.Request) {
-	_, err := g.authenticateAgent(r)
-	if err != nil {
-		http.Error(w, "invalid API key", http.StatusUnauthorized)
-		return
-	}
-
-	if g.lightragClient == nil {
-		http.Error(w, "knowledge base not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	var req struct {
-		Documents []struct {
-			Content string `json:"content"`
-			Source  string `json:"source,omitempty"`
-		} `json:"documents"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if len(req.Documents) == 0 {
-		http.Error(w, "documents array is required", http.StatusBadRequest)
-		return
-	}
-
-	texts := make([]string, len(req.Documents))
-	sources := make([]string, len(req.Documents))
-	for i, d := range req.Documents {
-		texts[i] = d.Content
-		sources[i] = d.Source
-	}
-
-	lreq := map[string]any{"texts": texts, "file_sources": sources}
-	body, _ := json.Marshal(lreq)
-	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, g.lightragBaseURL+"/documents/texts", bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, "failed to build request", http.StatusInternalServerError)
-		return
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+g.lightragAPIKey)
-
-	resp, err := g.lightragClient.Do(httpReq)
-	if err != nil {
-		g.log.Error("LightRAG ingest failed", zap.Error(err))
-		http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		g.log.Error("LightRAG ingest error", zap.Int("status", resp.StatusCode), zap.String("body", string(respBody)))
-		http.Error(w, "ingest failed: "+string(respBody), resp.StatusCode)
-		return
-	}
-
-	g.log.Info("Knowledge documents ingested via LightRAG", zap.Int("count", len(texts)))
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "count": len(texts)})
-}
-
-func (g *Gateway) knowledgeCollectionsHandler(w http.ResponseWriter, r *http.Request) {
-	_, err := g.authenticateAgent(r)
-	if err != nil {
-		http.Error(w, "invalid API key", http.StatusUnauthorized)
-		return
-	}
-	http.Error(w, "collections not supported with LightRAG backend", http.StatusNotImplemented)
-}
-
-func (g *Gateway) knowledgeDeleteCollectionHandler(w http.ResponseWriter, r *http.Request) {
-	_, err := g.authenticateAgent(r)
-	if err != nil {
-		http.Error(w, "invalid API key", http.StatusUnauthorized)
-		return
-	}
-	http.Error(w, "collections not supported with LightRAG backend", http.StatusNotImplemented)
+	json.NewEncoder(w).Encode(map[string]string{"result": owResp.Choices[0].Message.Content})
 }
 
 // --- Memos ---
